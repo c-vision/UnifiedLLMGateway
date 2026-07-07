@@ -142,13 +142,20 @@ func warmOllamaModel(port int, model string) error {
 // Backend process management (replaces llm-launch)
 // ============================================================================
 
+// Both functions restrict lsof to LISTEN sockets only (-sTCP:LISTEN).
+// Without it, lsof also matches the gateway's own outbound client
+// connections to the backend port (e.g. its keep-alive HTTP connection
+// while proxying requests) — killPort(cfg.BackendPort) could then kill
+// the gateway process itself instead of (or in addition to) the actual
+// backend, since the gateway is always a "user" of that port too.
+
 func portInUse(port int) bool {
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port)).Output()
+	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN").Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 func killPort(port int) {
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port)).Output()
+	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN").Output()
 	if err != nil {
 		return
 	}

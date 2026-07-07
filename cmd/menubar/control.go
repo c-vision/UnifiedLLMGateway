@@ -77,8 +77,16 @@ func portOpen(port int) bool {
 	return true
 }
 
+// killPort and portOwnerCommand both restrict lsof to LISTEN sockets only
+// (-sTCP:LISTEN). Without it, lsof also matches the gateway's own
+// outbound client connections to the backend port (its keep-alive HTTP
+// connection while proxying requests) — which showed up as a *lower* PID
+// than the actual backend process and got picked first, so the menu bar
+// misidentified the gateway itself as "not rapid-mlx, not ds4" and kept
+// showing 🔴 even while a model was loaded and serving requests fine.
+
 func killPort(port int) {
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port)).Output()
+	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN").Output()
 	if err != nil {
 		return
 	}
@@ -98,7 +106,7 @@ func killPort(port int) {
 // as the invoked script path; ds4-server is a real binary and shows up
 // under its own name either way.
 func portOwnerCommand(port int) string {
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port)).Output()
+	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN").Output()
 	if err != nil {
 		return ""
 	}
