@@ -60,7 +60,7 @@ func requestLogger() gin.HandlerFunc {
 		startTime := time.Now()
 		path := c.Request.URL.Path
 		method := c.Request.Method
-		
+
 		// Read body for logging
 		var bodyBytes []byte
 		if c.Request.Body != nil {
@@ -136,6 +136,7 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 	backendURL := fmt.Sprintf("http://localhost:%d", backend.Port)
 	resp, err := http.Post(backendURL+"/v1/chat/completions", "application/json", bytes.NewBuffer(body))
 	if err != nil {
+		ensureBackendLoading(req.Model)
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
 		return
 	}
@@ -307,7 +308,7 @@ func (g *Gateway) handleCountTokens(c *gin.Context) {
 
 	c.JSON(200, gin.H{
 		"usage": gin.H{
-			"input_tokens": 100, 
+			"input_tokens": 100,
 		},
 	})
 }
@@ -544,6 +545,7 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 
 	resp, err := http.DefaultClient.Do(proxyReq)
 	if err != nil {
+		ensureBackendLoading(originalModel)
 		c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
 		return
 	}
@@ -586,7 +588,7 @@ func main() {
 	anthroSrv.Use(requestLogger()) // Enable logging for Anthropic API
 	anthroSrv.POST("/v1/messages", g.handleAnthropicMessages)
 	anthroSrv.POST("/v1/messages/count_tokens", g.handleCountTokens)
-	
+
 	openAiSrv := gin.Default()
 	openAiSrv.Use(requestLogger()) // Enable logging for OpenAI API
 	openAiSrv.Any("/*path", g.handleOpenAIProxy)

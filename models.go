@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -250,6 +251,47 @@ func ensureGatewayRunning() {
 		return
 	}
 	waitForPort(8082, 15*time.Second)
+}
+
+var (
+	autoLoadMu       sync.Mutex
+	autoLoadInFlight bool
+)
+
+// ensureBackendLoading is called by the request handlers when the backend
+// port turns out to be unreachable — it self-heals by loading the model
+// the client actually asked for, in the background, so a client that never
+// ran `unified-gateway load` (or whose backend crashed) recovers on its
+// own instead of failing forever. It never blocks the caller: Claude Code
+// and other clients already retry on 5xx responses (observed retrying
+// automatically after the "Local LLM Backend unreachable" error), so the
+// retry is what picks up the now-loaded model — we don't need to hold the
+// original HTTP request open for however long a model load takes.
+// autoLoadInFlight prevents piling up redundant loads if several requests
+// arrive (or retry) while one is already in progress.
+func ensureBackendLoading(shortName string) {
+	if shortName == "" {
+		return
+	}
+	autoLoadMu.Lock()
+	if autoLoadInFlight {
+		autoLoadMu.Unlock()
+		return
+	}
+	autoLoadInFlight = true
+	autoLoadMu.Unlock()
+
+	go func() {
+		defer func() {
+			autoLoadMu.Lock()
+			autoLoadInFlight = false
+			autoLoadMu.Unlock()
+		}()
+		fmt.Printf("[unified-gateway] backend unreachable, auto-loading %q...\n", shortName)
+		if err := loadModel(shortName); err != nil {
+			fmt.Printf("[unified-gateway] auto-load of %q failed: %v\n", shortName, err)
+		}
+	}()
 }
 
 // loadModel kills whatever is on the backend port and launches the requested
