@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +18,10 @@ import (
 // won't let one main package import another), so the fields are kept in
 // sync by hand with models.go's Config/ModelConfig.
 type modelConfig struct {
-	Label   string `json:"label"`
-	Backend string `json:"backend"`
+	Path        string `json:"path,omitempty"`
+	Label       string `json:"label"`
+	Backend     string `json:"backend"`
+	OllamaModel string `json:"ollama_model,omitempty"`
 }
 
 type gwConfig struct {
@@ -27,10 +30,12 @@ type gwConfig struct {
 	Models      map[string]modelConfig `json:"models"`
 }
 
-type activeBackend struct {
-	Port          int    `json:"port"`
-	UpstreamModel string `json:"upstream_model,omitempty"`
-	Model         string `json:"model,omitempty"`
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
 
 func binDir() string {
@@ -41,9 +46,8 @@ func binDir() string {
 	return filepath.Join(home, ".local", "bin")
 }
 
-func gatewayBinary() string     { return filepath.Join(binDir(), "unified-gateway") }
-func modelsJSONPath() string    { return filepath.Join(binDir(), "models.json") }
-func activeBackendPath() string { return filepath.Join(binDir(), "active-backend.json") }
+func gatewayBinary() string  { return filepath.Join(binDir(), "unified-gateway") }
+func modelsJSONPath() string { return filepath.Join(binDir(), "models.json") }
 
 func loadGWConfig() (*gwConfig, error) {
 	data, err := os.ReadFile(modelsJSONPath())
@@ -57,17 +61,11 @@ func loadGWConfig() (*gwConfig, error) {
 	if cfg.OllamaPort == 0 {
 		cfg.OllamaPort = 11434
 	}
-	return &cfg, nil
-}
-
-func readActiveBackend() activeBackend {
-	data, err := os.ReadFile(activeBackendPath())
-	if err != nil {
-		return activeBackend{}
+	for name, m := range cfg.Models {
+		m.Path = expandHome(m.Path)
+		cfg.Models[name] = m
 	}
-	var ab activeBackend
-	_ = json.Unmarshal(data, &ab)
-	return ab
+	return &cfg, nil
 }
 
 func portOpen(port int) bool {
@@ -87,6 +85,131 @@ func killPort(port int) {
 	for _, pidStr := range strings.Fields(string(out)) {
 		exec.Command("kill", "-9", pidStr).Run()
 	}
+}
+
+// portOwnerCommand returns the full command line of whichever process is
+// listening on port, or "" if nothing is listening (or it can't be
+// determined). This is the ground truth for "what's actually running" —
+// nothing here is cached or read from a file we wrote earlier, since
+// another client could have replaced the process, or the user could have
+// stopped it, entirely outside this tool. rapid-mlx runs as a Python
+// script (ps -o comm= would just say "python3.12"), so we match against
+// the full command line ("command="), which still contains "rapid-mlx"
+// as the invoked script path; ds4-server is a real binary and shows up
+// under its own name either way.
+func portOwnerCommand(port int) string {
+	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port)).Output()
+	if err != nil {
+		return ""
+	}
+	pids := strings.Fields(string(out))
+	if len(pids) == 0 {
+		return ""
+	}
+	psOut, err := exec.Command("ps", "-p", pids[0], "-o", "command=").Output()
+	if err != nil {
+		return ""
+	}
+	return string(psOut)
+}
+
+// commandFlagValue returns the value following flag in a space-separated
+// command line, or "" if flag isn't present.
+func commandFlagValue(cmd, flag string) string {
+	fields := strings.Fields(cmd)
+	for i, f := range fields {
+		if f == flag && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
+// runningMLXModel reports whether rapid-mlx is the process on port, and
+// if so, which model it's serving — read directly from its own
+// --served-model-name argument, not from any bookkeeping file.
+func runningMLXModel(port int) (shortName string, active bool) {
+	cmd := portOwnerCommand(port)
+	if !strings.Contains(cmd, "rapid-mlx") {
+		return "", false
+	}
+	return commandFlagValue(cmd, "--served-model-name"), true
+}
+
+// runningDS4Model reports whether ds4-server is the process on port, and
+// if so, which model it's serving. ds4-server has no --served-model-name
+// equivalent, only --model <path>, so the path is matched back against
+// models.json to recover the shortname; if no configured model matches
+// (e.g. it was started manually with an unlisted file), the raw path is
+// returned instead so there's still something meaningful to show.
+func runningDS4Model(cfg *gwConfig, port int) (label string, active bool) {
+	cmd := portOwnerCommand(port)
+	if !strings.Contains(cmd, "ds4-server") {
+		return "", false
+	}
+	path := commandFlagValue(cmd, "--model")
+	if path == "" {
+		return "", true
+	}
+	if cfg != nil {
+		for name, m := range cfg.Models {
+			if m.Backend == "ds4" && m.Path == path {
+				return name, true
+			}
+		}
+	}
+	return path, true
+}
+
+// runningOllamaModel asks Ollama's own API which model it currently has
+// loaded in memory (empty if none), rather than assuming based on what
+// this tool last told it to warm up.
+func runningOllamaModel(port int) string {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/ps", port))
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	var parsed struct {
+		Models []struct {
+			Name  string `json:"name"`
+			Model string `json:"model"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil || len(parsed.Models) == 0 {
+		return ""
+	}
+	if parsed.Models[0].Name != "" {
+		return parsed.Models[0].Name
+	}
+	return parsed.Models[0].Model
+}
+
+// gatewayCurrentModel asks the gateway's own OpenAI adapter which model
+// it's routing to right now (GET /v1/models) — this reflects the
+// gateway's own live backend-selection logic directly, so there's
+// nothing here for the menu bar to cache or get out of sync with.
+func gatewayCurrentModel() string {
+	resp, err := http.Get("http://127.0.0.1:8082/v1/models")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil || len(parsed.Data) == 0 {
+		return ""
+	}
+	return parsed.Data[0].ID
 }
 
 func ollamaRunning() bool {
@@ -155,13 +278,13 @@ func stopBackend(cfg *gwConfig) {
 }
 
 // loadModelAsync runs `unified-gateway load <shortName>` out-of-process
-// (it can block for up to several minutes while a model warms up) and
-// reports completion via onDone, called from the spawned goroutine.
-func loadModelAsync(shortName string, onDone func(error)) {
+// (it can block for up to several minutes while a model warms up) without
+// waiting for it — refreshLoop's polling picks up the result (or lack of
+// one) on its own, so there's no completion callback to wire up here.
+func loadModelAsync(shortName string) {
 	go func() {
 		cmd := exec.Command(gatewayBinary(), "load", shortName)
 		cmd.Dir = binDir()
-		err := cmd.Run()
-		onDone(err)
+		cmd.Run()
 	}()
 }

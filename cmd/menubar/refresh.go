@@ -42,22 +42,25 @@ func setEnabled(item *systray.MenuItem, enabled bool) {
 	}
 }
 
-// refreshLoop polls process/port state every few seconds and reflects it
-// across the whole menu: gateway/model status line, Start/Stop items
-// disabled to match reality (never both enabled, never both disabled),
-// which of rapid-mlx/ds4/Ollama is confirmed active, and the checkmark on
-// the active model. The tray icon itself stays a fixed black "U" — status
-// is conveyed only by the 🟢/🟡/🔴 text in the menu items. Each backend
-// only ever shows two states here — running (🟢) or not (🔴) — port
-// conflicts with some other, unrelated process are handled at Start time
-// instead (see confirmPortFree in control.go), not as a third status here.
+// refreshLoop polls live state every few seconds and reflects it across
+// the whole menu. Nothing here is read from a file this tool wrote
+// earlier — a different client could have replaced rapid-mlx or ds4's
+// process, or the user could have stopped Ollama by hand, so every
+// status is re-derived from the real, current state each tick:
+//   - rapid-mlx/ds4: which process actually owns the backend port, and
+//     which model it's serving, read from that process's own command
+//     line (see runningMLXModel/runningDS4Model in control.go)
+//   - Ollama: whether the app process is alive (pgrep), and which model
+//     it has loaded, via Ollama's own /api/ps
+//   - the top status line: what the gateway itself is routing to right
+//     now, via its own GET /v1/models — the gateway's live answer, not a
+//     cached guess
 func refreshLoop(r refreshRefs) {
 	ticker := time.NewTicker(4 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		gwUp := portOpen(8082) && portOpen(8083)
-		ab := readActiveBackend()
 		ollUp := ollamaRunning()
 
 		setEnabled(r.mStartGateway, !gwUp)
@@ -66,29 +69,27 @@ func refreshLoop(r refreshRefs) {
 		setEnabled(r.mOllamaStop, ollUp)
 
 		statusLine := "🔴 stopped"
-		switch {
-		case gwUp && ab.Model != "":
-			statusLine = fmt.Sprintf("🟢 %s", ab.Model)
-		case gwUp:
-			statusLine = "🟡 no model"
+		if gwUp {
+			if m := gatewayCurrentModel(); m != "" {
+				statusLine = fmt.Sprintf("🟢 %s", m)
+			} else {
+				statusLine = "🟡 no model"
+			}
 		}
 		r.mStatus.SetTitle(statusLine)
 
-		activeType := "" // "mlx", "ds4", "ollama", or "" if unknown/idle
-		if r.cfg != nil && ab.Model != "" {
-			if m, ok := r.cfg.Models[ab.Model]; ok {
-				activeType = m.Backend
-			}
-		}
-
+		var mlxModel, ds4Model string
+		var mlxActive, ds4Active bool
 		if r.cfg != nil {
-			backendUp := portOpen(r.cfg.BackendPort)
-			mlxActive := backendUp && activeType == "mlx"
-			ds4Active := backendUp && activeType == "ds4"
+			mlxModel, mlxActive = runningMLXModel(r.cfg.BackendPort)
+			ds4Model, ds4Active = runningDS4Model(r.cfg, r.cfg.BackendPort)
 
-			if mlxActive {
-				r.mMLX.SetTitle(fmt.Sprintf("🟢 rapid-mlx %s (port %d)", ab.Model, r.cfg.BackendPort))
-			} else {
+			switch {
+			case mlxActive && mlxModel != "":
+				r.mMLX.SetTitle(fmt.Sprintf("🟢 rapid-mlx %s (port %d)", mlxModel, r.cfg.BackendPort))
+			case mlxActive:
+				r.mMLX.SetTitle(fmt.Sprintf("🟢 rapid-mlx (port %d)", r.cfg.BackendPort))
+			default:
 				r.mMLX.SetTitle("🔴 rapid-mlx")
 			}
 			if r.mlxDefault != "" {
@@ -96,9 +97,12 @@ func refreshLoop(r refreshRefs) {
 			}
 			setEnabled(r.mStopMLX, mlxActive)
 
-			if ds4Active {
-				r.mDS4.SetTitle(fmt.Sprintf("🟢 ds4 %s (port %d)", ab.Model, r.cfg.BackendPort))
-			} else {
+			switch {
+			case ds4Active && ds4Model != "":
+				r.mDS4.SetTitle(fmt.Sprintf("🟢 ds4 %s (port %d)", ds4Model, r.cfg.BackendPort))
+			case ds4Active:
+				r.mDS4.SetTitle(fmt.Sprintf("🟢 ds4 (port %d)", r.cfg.BackendPort))
+			default:
 				r.mDS4.SetTitle("🔴 ds4")
 			}
 			if r.ds4Default != "" {
@@ -111,9 +115,13 @@ func refreshLoop(r refreshRefs) {
 		if r.cfg != nil && r.cfg.OllamaPort != 0 {
 			ollamaPort = r.cfg.OllamaPort
 		}
+		var ollamaModel string
+		if ollUp {
+			ollamaModel = runningOllamaModel(ollamaPort)
+		}
 		switch {
-		case ollUp && activeType == "ollama":
-			r.mOllamaGroup.SetTitle(fmt.Sprintf("🟢 Ollama %s (port %d)", ab.Model, ollamaPort))
+		case ollUp && ollamaModel != "":
+			r.mOllamaGroup.SetTitle(fmt.Sprintf("🟢 Ollama %s (port %d)", ollamaModel, ollamaPort))
 		case ollUp:
 			r.mOllamaGroup.SetTitle(fmt.Sprintf("🟢 Ollama (port %d)", ollamaPort))
 		default:
@@ -121,7 +129,17 @@ func refreshLoop(r refreshRefs) {
 		}
 
 		for name, item := range r.modelItems {
-			if gwUp && ab.Model == name {
+			checked := (mlxActive && name == mlxModel) || (ds4Active && name == ds4Model)
+			if !checked && ollUp && ollamaModel != "" && r.cfg != nil {
+				if m, ok := r.cfg.Models[name]; ok && m.Backend == "ollama" {
+					tag := m.OllamaModel
+					if tag == "" {
+						tag = name
+					}
+					checked = tag == ollamaModel
+				}
+			}
+			if checked {
 				item.Check()
 			} else {
 				item.Uncheck()

@@ -18,10 +18,14 @@ func main() {
 
 // addModelItems adds one clickable submenu item per model name (sorted),
 // wired to load that model on click, and records each in modelItems so
-// refreshLoop can checkmark whichever one is currently active. No port
-// confirmation here: switching between models of the same backend is the
-// everyday case and should stay frictionless, exactly like `unified-gateway
-// load <name>` already behaves on the command line.
+// refreshLoop can checkmark whichever one is currently active. Titles
+// never change on click — refreshLoop's periodic polling is the only
+// source of truth for what's running, so there's no transient
+// "loading…"/"failed" text that could get stuck if a load is aborted or
+// fails. No port confirmation here either: switching between models of
+// the same backend is the everyday case and should stay frictionless,
+// exactly like `unified-gateway load <name>` already behaves on the
+// command line.
 func addModelItems(parent *systray.MenuItem, cfg *gwConfig, names []string, modelItems map[string]*systray.MenuItem) {
 	sort.Strings(names)
 	for _, n := range names {
@@ -29,20 +33,11 @@ func addModelItems(parent *systray.MenuItem, cfg *gwConfig, names []string, mode
 		label := fmt.Sprintf("%s (%s)", m.Label, n)
 		item := parent.AddSubMenuItem(label, "Load "+n)
 		modelItems[n] = item
-		go func(shortName, baseLabel string, item *systray.MenuItem) {
+		go func(shortName string, item *systray.MenuItem) {
 			for range item.ClickedCh {
-				item.Disable()
-				item.SetTitle(baseLabel + " — loading…")
-				loadModelAsync(shortName, func(err error) {
-					if err != nil {
-						item.SetTitle(baseLabel + " — failed")
-					} else {
-						item.SetTitle(baseLabel)
-					}
-					item.Enable()
-				})
+				loadModelAsync(shortName)
 			}
-		}(n, label, item)
+		}(n, item)
 	}
 }
 
@@ -52,8 +47,11 @@ func addModelItems(parent *systray.MenuItem, cfg *gwConfig, names []string, mode
 // doesn't need a model choice up front. It's only enabled (see
 // refreshLoop) when this backend isn't already the active one, so a port
 // conflict here always means a genuinely different service is in the
-// way — worth confirming before killing it. Permanently disabled if the
-// backend has no models configured at all (targetModel == "").
+// way — worth confirming before killing it. Like addModelItems, its title
+// never changes on click; refreshLoop's polling drives enabled/disabled
+// state, so there's nothing that can get stuck showing "failed".
+// Permanently disabled if the backend has no models configured at all
+// (targetModel == "").
 func addStartItem(parent *systray.MenuItem, label, targetModel string, port int) *systray.MenuItem {
 	tooltip := fmt.Sprintf("Load %s on port %d", targetModel, port)
 	item := parent.AddSubMenuItem(label, tooltip)
@@ -66,17 +64,7 @@ func addStartItem(parent *systray.MenuItem, label, targetModel string, port int)
 			if !confirmPortFree(port, label) {
 				continue
 			}
-			item.Disable()
-			item.SetTitle(label + " — loading…")
-			loadModelAsync(targetModel, func(err error) {
-				if err != nil {
-					item.SetTitle(label + " — failed")
-				} else {
-					item.SetTitle(label)
-				}
-				// refreshLoop re-disables it once this backend is confirmed active.
-				item.Enable()
-			})
+			loadModelAsync(targetModel)
 		}
 	}()
 	return item
