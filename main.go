@@ -1,0 +1,614 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+func randomID(prefix string) string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return prefix + "_" + hex.EncodeToString(b)
+}
+
+// ============================================================================
+// Unified Gateway State
+// ============================================================================
+
+type Gateway struct {
+	// backendPort is only the startup fallback, used when no `load` has ever
+	// run yet (active-backend.json missing). Once a model has been loaded,
+	// resolveBackend reads that file on every request instead — Ollama and
+	// rapid-mlx/ds4-server live on different, independent ports, so the
+	// actual backend can change without restarting the gateway.
+	backendPort int
+}
+
+func NewGateway() *Gateway {
+	port := 11435
+	if cfg, err := loadConfig(); err == nil && cfg.BackendPort != 0 {
+		port = cfg.BackendPort
+	} else {
+		log.Printf("⚠️  could not read models.json (%v), defaulting backend port to %d", err, port)
+	}
+	return &Gateway{backendPort: port}
+}
+
+// resolveBackend returns the port (and, if serving via Ollama, the upstream
+// model name to substitute) that `unified-gateway load <shortname>` last
+// selected.
+func (g *Gateway) resolveBackend() activeBackend {
+	return readActiveBackend(g.backendPort)
+}
+
+// Middleware to log requests in detail
+func requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		startTime := time.Now()
+		path := c.Request.URL.Path
+		method := c.Request.Method
+		
+		// Read body for logging
+		var bodyBytes []byte
+		if c.Request.Body != nil {
+			bodyBytes, _ = io.ReadAll(c.Request.Body)
+		}
+		// Restore body for subsequent handlers
+		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+		log.Printf("[%s] 📩 Incoming %s %s", time.Now().Format("15:04:05"), method, path)
+		if len(bodyBytes) > 0 {
+			content := string(bodyBytes)
+			if len(content) > 200 {
+				content = content[:200] + "... [truncated]"
+			}
+			log.Printf("📦 Payload: %s", content)
+		}
+
+		c.Next()
+
+		latency := time.Since(startTime)
+		log.Printf("[%s] ✅ Response %d | Latency: %v", time.Now().Format("15:04:05"), c.Writer.Status(), latency)
+	}
+}
+
+// ============================================================================
+// Anthropic Adapter (Claude Code Support)
+// ============================================================================
+
+type AnthropicRequest struct {
+	Model       string                   `json:"model"`
+	System      interface{}              `json:"system,omitempty"`
+	Messages    []Message                `json:"messages"`
+	Tools       []map[string]interface{} `json:"tools,omitempty"`
+	MaxTokens   int                      `json:"max_tokens"`
+	Temperature float64                  `json:"temperature"`
+	Stream      bool                     `json:"stream"`
+}
+
+type Message struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
+	var req AnthropicRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	if compactType := detectCompactType(req.System, req.Messages); compactType != compactNone {
+		log.Printf("🗜️  %s", compactTypeLabel(compactType))
+	}
+
+	backend := g.resolveBackend()
+	upstreamModel := req.Model
+	if backend.UpstreamModel != "" {
+		upstreamModel = backend.UpstreamModel
+	}
+
+	openaiPayload := map[string]interface{}{
+		"model":       upstreamModel,
+		"messages":    translateMessagesToOpenAI(req.System, req.Messages),
+		"max_tokens":  req.MaxTokens,
+		"temperature": req.Temperature,
+		"stream":      req.Stream,
+	}
+	if tools := translateToolsToOpenAI(req.Tools); tools != nil {
+		openaiPayload["tools"] = tools
+	}
+
+	body, _ := json.Marshal(openaiPayload)
+	backendURL := fmt.Sprintf("http://localhost:%d", backend.Port)
+	resp, err := http.Post(backendURL+"/v1/chat/completions", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
+		return
+	}
+	defer resp.Body.Close()
+
+	if req.Stream {
+		streamOpenAIToAnthropic(c, resp.Body, req.Model)
+	} else {
+		var openaiResp map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&openaiResp)
+		anthroResp := translateOpenAIResponseToAnthropic(openaiResp, req.Model)
+		c.JSON(200, anthroResp)
+	}
+}
+
+// streamOpenAIToAnthropic reads an OpenAI-style SSE stream from the backend
+// and re-emits it as Anthropic Messages API SSE events, since Claude Code
+// expects message_start/content_block_delta/message_stop, not raw OpenAI
+// chat.completion.chunk events.
+func streamOpenAIToAnthropic(c *gin.Context, body io.Reader, model string) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	flusher, _ := c.Writer.(http.Flusher)
+	sseSend := func(event string, data interface{}) {
+		payload, _ := json.Marshal(data)
+		fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event, payload)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	msgID := randomID("msg")
+	sseSend("message_start", gin.H{
+		"type": "message_start",
+		"message": gin.H{
+			"id": msgID, "type": "message", "role": "assistant",
+			"content": []interface{}{}, "model": model,
+			"stop_reason": nil, "stop_sequence": nil,
+			"usage": gin.H{"input_tokens": 0, "output_tokens": 0},
+		},
+	})
+
+	nextIndex := 0
+	textIndex := -1
+	textOpen := false
+	toolBlockIndex := map[float64]int{}
+	var toolOpenOrder []int
+	outputTokens := 0
+	finishReason := "stop"
+
+	ensureTextOpen := func() {
+		if !textOpen {
+			textIndex = nextIndex
+			nextIndex++
+			sseSend("content_block_start", gin.H{
+				"type": "content_block_start", "index": textIndex,
+				"content_block": gin.H{"type": "text", "text": ""},
+			})
+			textOpen = true
+		}
+	}
+	closeTextIfOpen := func() {
+		if textOpen {
+			sseSend("content_block_stop", gin.H{"type": "content_block_stop", "index": textIndex})
+			textOpen = false
+		}
+	}
+
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var chunk map[string]interface{}
+		if err := json.Unmarshal([]byte(line[6:]), &chunk); err != nil {
+			continue
+		}
+		choices, _ := chunk["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		choice, _ := choices[0].(map[string]interface{})
+		if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+			finishReason = fr
+		}
+		delta, _ := choice["delta"].(map[string]interface{})
+		if delta == nil {
+			continue
+		}
+		if text, ok := delta["content"].(string); ok && text != "" {
+			ensureTextOpen()
+			outputTokens++
+			sseSend("content_block_delta", gin.H{
+				"type": "content_block_delta", "index": textIndex,
+				"delta": gin.H{"type": "text_delta", "text": text},
+			})
+		}
+		if rawTCs, ok := delta["tool_calls"].([]interface{}); ok {
+			closeTextIfOpen()
+			for _, rawTC := range rawTCs {
+				tc, ok := rawTC.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				oaiIdx, _ := tc["index"].(float64)
+				fn, _ := tc["function"].(map[string]interface{})
+				blockIdx, seen := toolBlockIndex[oaiIdx]
+				if !seen {
+					blockIdx = nextIndex
+					nextIndex++
+					toolBlockIndex[oaiIdx] = blockIdx
+					toolOpenOrder = append(toolOpenOrder, blockIdx)
+					name := ""
+					if fn != nil {
+						if n, ok := fn["name"].(string); ok {
+							name = n
+						}
+					}
+					id, _ := tc["id"].(string)
+					sseSend("content_block_start", gin.H{
+						"type": "content_block_start", "index": blockIdx,
+						"content_block": gin.H{"type": "tool_use", "id": id, "name": name, "input": gin.H{}},
+					})
+				}
+				if fn != nil {
+					if args, ok := fn["arguments"].(string); ok && args != "" {
+						outputTokens++
+						sseSend("content_block_delta", gin.H{
+							"type": "content_block_delta", "index": blockIdx,
+							"delta": gin.H{"type": "input_json_delta", "partial_json": args},
+						})
+					}
+				}
+			}
+		}
+	}
+
+	closeTextIfOpen()
+	for _, idx := range toolOpenOrder {
+		sseSend("content_block_stop", gin.H{"type": "content_block_stop", "index": idx})
+	}
+
+	stopReason := "end_turn"
+	switch finishReason {
+	case "tool_calls":
+		stopReason = "tool_use"
+	case "length":
+		stopReason = "max_tokens"
+	}
+
+	sseSend("message_delta", gin.H{
+		"type":  "message_delta",
+		"delta": gin.H{"stop_reason": stopReason, "stop_sequence": nil},
+		"usage": gin.H{"output_tokens": outputTokens},
+	})
+	sseSend("message_stop", gin.H{"type": "message_stop"})
+}
+
+func (g *Gateway) handleCountTokens(c *gin.Context) {
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"usage": gin.H{
+			"input_tokens": 100, 
+		},
+	})
+}
+
+// extractBlockText concatenates the text of any {"type":"text","text":"..."}
+// blocks found in an Anthropic content value (string or block array).
+func extractBlockText(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var sb strings.Builder
+		for _, item := range v {
+			if b, ok := item.(map[string]interface{}); ok && b["type"] == "text" {
+				sb.WriteString(fmt.Sprintf("%v", b["text"]))
+			}
+		}
+		return sb.String()
+	}
+	return ""
+}
+
+// translateMessagesToOpenAI converts Anthropic system + messages (including
+// tool_use / tool_result content blocks) into an OpenAI-style message list.
+// translateMessagesToOpenAI converts Anthropic system + messages into an
+// OpenAI-style message list. Any role:"system" message embedded inside the
+// messages array (Claude Code sends these interleaved, e.g. the available
+// agents/skills list) is pulled out and merged into a single leading system
+// message — most chat templates expect exactly one system turn at position
+// 0, and leaving it in its original (later) position can make local models
+// silently produce empty completions.
+func translateMessagesToOpenAI(system interface{}, anthroMsgs []Message) []map[string]interface{} {
+	var out []map[string]interface{}
+
+	var systemParts []string
+	if sysText := extractBlockText(system); sysText != "" {
+		systemParts = append(systemParts, sysText)
+	}
+	var restMsgs []Message
+	for _, m := range anthroMsgs {
+		if m.Role == "system" {
+			if text := extractBlockText(m.Content); text != "" {
+				systemParts = append(systemParts, text)
+			}
+			continue
+		}
+		restMsgs = append(restMsgs, m)
+	}
+	if len(systemParts) > 0 {
+		out = append(out, map[string]interface{}{"role": "system", "content": strings.Join(systemParts, "\n\n")})
+	}
+
+	for _, m := range restMsgs {
+		switch content := m.Content.(type) {
+		case string:
+			if content != "" || m.Role == "assistant" {
+				out = append(out, map[string]interface{}{"role": m.Role, "content": content})
+			}
+		case []interface{}:
+			var textParts []string
+			var toolCalls []map[string]interface{}
+			for _, item := range content {
+				block, ok := item.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				switch block["type"] {
+				case "text":
+					textParts = append(textParts, fmt.Sprintf("%v", block["text"]))
+				case "tool_use":
+					inputJSON, _ := json.Marshal(block["input"])
+					toolCalls = append(toolCalls, map[string]interface{}{
+						"id":   block["id"],
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      block["name"],
+							"arguments": string(inputJSON),
+						},
+					})
+				case "tool_result":
+					out = append(out, map[string]interface{}{
+						"role":         "tool",
+						"tool_call_id": block["tool_use_id"],
+						"content":      extractBlockText(block["content"]),
+					})
+				}
+			}
+			text := strings.TrimSpace(strings.Join(textParts, ""))
+			if len(toolCalls) > 0 {
+				out = append(out, map[string]interface{}{
+					"role": m.Role, "content": text, "tool_calls": toolCalls,
+				})
+			} else if text != "" || m.Role == "assistant" {
+				out = append(out, map[string]interface{}{"role": m.Role, "content": text})
+			}
+		}
+	}
+	return out
+}
+
+// translateToolsToOpenAI converts Anthropic tool definitions
+// ({"name","description","input_schema"}) to OpenAI's function-tool shape.
+func translateToolsToOpenAI(tools []map[string]interface{}) []map[string]interface{} {
+	if len(tools) == 0 {
+		return nil
+	}
+	var out []map[string]interface{}
+	for _, t := range tools {
+		schema := t["input_schema"]
+		if schema == nil {
+			schema = map[string]interface{}{}
+		}
+		out = append(out, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        t["name"],
+				"description": t["description"],
+				"parameters":  schema,
+			},
+		})
+	}
+	return out
+}
+
+// translateOpenAIResponseToAnthropic builds the Anthropic response. It uses
+// originalModel (what the client asked for) rather than openaiResp["model"]
+// so that a backend-side rename (e.g. Ollama's own "gemma4:31b-mlx" tag) is
+// never leaked back to the client.
+func translateOpenAIResponseToAnthropic(openaiResp map[string]interface{}, originalModel string) map[string]interface{} {
+	choices, ok := openaiResp["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return map[string]interface{}{"error": "no choices found"}
+	}
+	firstChoice := choices[0].(map[string]interface{})
+	msg, _ := firstChoice["message"].(map[string]interface{})
+	usage, _ := openaiResp["usage"].(map[string]interface{})
+
+	var content []map[string]interface{}
+	if text, ok := msg["content"].(string); ok && text != "" {
+		content = append(content, map[string]interface{}{"type": "text", "text": text})
+	}
+	if toolCalls, ok := msg["tool_calls"].([]interface{}); ok {
+		for _, rawTC := range toolCalls {
+			tc, ok := rawTC.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			fn, _ := tc["function"].(map[string]interface{})
+			var input map[string]interface{}
+			if args, ok := fn["arguments"].(string); ok {
+				json.Unmarshal([]byte(args), &input)
+			}
+			content = append(content, map[string]interface{}{
+				"type": "tool_use", "id": tc["id"], "name": fn["name"], "input": input,
+			})
+		}
+	}
+
+	stopReason := "end_turn"
+	switch fmt.Sprintf("%v", firstChoice["finish_reason"]) {
+	case "tool_calls":
+		stopReason = "tool_use"
+	case "length":
+		stopReason = "max_tokens"
+	}
+
+	return map[string]interface{}{
+		"id":            openaiResp["id"],
+		"type":          "message",
+		"role":          "assistant",
+		"model":         originalModel,
+		"content":       content,
+		"stop_reason":   stopReason,
+		"stop_sequence": nil,
+		"usage": map[string]interface{}{
+			"input_tokens":  usage["prompt_tokens"],
+			"output_tokens": usage["completion_tokens"],
+		},
+	}
+}
+
+// ============================================================================
+// OpenAI Adapter (General Purpose)
+// ============================================================================
+
+// handleOpenAIProxy forwards any method/path to the backend as-is — GET
+// /v1/models (no body) is just as valid as a POST /v1/chat/completions, and
+// forcing JSON binding on every request broke plain GETs that OpenCode and
+// other OpenAI-compatible clients use to list models / check connectivity.
+func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
+	var bodyBytes []byte
+	if c.Request.Body != nil {
+		bodyBytes, _ = io.ReadAll(c.Request.Body)
+	}
+
+	backend := g.resolveBackend()
+
+	// If the currently active model is served via Ollama under its own tag
+	// (e.g. "gemma4:31b-mlx"), rewrite whatever model name the client sent
+	// to that tag before forwarding — mirrors what --served-model-name does
+	// for rapid-mlx, since Ollama has no equivalent per-request alias.
+	isStream := false
+	originalModel := ""
+	if len(bodyBytes) > 0 {
+		var payload map[string]interface{}
+		if json.Unmarshal(bodyBytes, &payload) == nil {
+			isStream = payload["stream"] == true
+			if m, ok := payload["model"].(string); ok {
+				originalModel = m
+			}
+			if backend.UpstreamModel != "" && originalModel != "" {
+				payload["model"] = backend.UpstreamModel
+				if rewritten, err := json.Marshal(payload); err == nil {
+					bodyBytes = rewritten
+				}
+			}
+		}
+	}
+
+	backendURL := fmt.Sprintf("http://localhost:%d", backend.Port)
+	targetURL := backendURL + c.Request.URL.Path
+	if c.Request.URL.RawQuery != "" {
+		targetURL += "?" + c.Request.URL.RawQuery
+	}
+
+	proxyReq, err := http.NewRequest(c.Request.Method, targetURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to build backend request"})
+		return
+	}
+	if ct := c.Request.Header.Get("Content-Type"); ct != "" {
+		proxyReq.Header.Set("Content-Type", ct)
+	}
+
+	resp, err := http.DefaultClient.Do(proxyReq)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
+		return
+	}
+	defer resp.Body.Close()
+
+	if isStream {
+		c.Header("Content-Type", "text/event-stream")
+		io.Copy(c.Writer, resp.Body)
+	} else {
+		var result map[string]interface{}
+		if json.NewDecoder(resp.Body).Decode(&result) != nil {
+			c.Status(resp.StatusCode)
+			return
+		}
+		if originalModel != "" {
+			if _, has := result["model"]; has {
+				result["model"] = originalModel
+			}
+		}
+		c.JSON(resp.StatusCode, result)
+	}
+}
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+func main() {
+	if len(os.Args) >= 3 && os.Args[1] == "load" {
+		if err := loadModel(os.Args[2]); err != nil {
+			log.Fatalf("[unified-gateway] load failed: %v", err)
+		}
+		return
+	}
+
+	g := NewGateway()
+	gin.SetMode(gin.ReleaseMode)
+
+	anthroSrv := gin.Default()
+	anthroSrv.Use(requestLogger()) // Enable logging for Anthropic API
+	anthroSrv.POST("/v1/messages", g.handleAnthropicMessages)
+	anthroSrv.POST("/v1/messages/count_tokens", g.handleCountTokens)
+	
+	openAiSrv := gin.Default()
+	openAiSrv.Use(requestLogger()) // Enable logging for OpenAI API
+	openAiSrv.Any("/*path", g.handleOpenAIProxy)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		log.Println("🚀 Unified Gateway: Anthropic Interface active on :8083")
+		if err := anthroSrv.Run(":8083"); err != nil {
+			log.Fatalf("Anthropic server failed: %v", err)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		log.Println("🚀 Unified Gateway: OpenAI Interface active on :8082")
+		if err := openAiSrv.Run(":8082"); err != nil {
+			log.Fatalf("OpenAI server failed: %v", err)
+		}
+	}()
+
+	wg.Wait()
+}

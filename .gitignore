@@ -1,0 +1,11 @@
+# Compiled binaries
+/unified-gateway
+/install-service
+/uninstall-service
+
+# Runtime state and logs (regenerated locally, machine-specific)
+/gateway.log
+/active-backend.json
+
+# Claude Code workspace metadata
+.claude/
