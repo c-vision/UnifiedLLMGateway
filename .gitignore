@@ -2,6 +2,9 @@
 /unified-gateway
 /install-service
 /uninstall-service
+/unified-gateway-menubar
+/install-menubar
+/uninstall-menubar
 
 # Runtime state and logs (regenerated locally, machine-specific)
 /gateway.log

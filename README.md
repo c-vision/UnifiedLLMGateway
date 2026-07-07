@@ -22,6 +22,7 @@ Unified Gateway does that translation, and adds model lifecycle management on to
 - **Model lifecycle management** — one command to hot-swap the active local model, whether it's served by a locally-spawned process or an already-running daemon like `ollama`, without restarting the gateway
 - **No port collisions, by design** — the gateway's own adapters, the model backend, and third-party tools (e.g. `ollama`) are always kept on distinct, non-overlapping ports
 - **Optional background service** — install as a macOS `launchd` agent that starts at login and restarts on crash
+- **Optional menu bar controller** — a small native tray app to start/stop the gateway, the model backend, and Ollama, and switch models, without a terminal
 
 ## Architecture
 
@@ -147,6 +148,41 @@ go build -o uninstall-service ./cmd/uninstall-service
 ```
 
 `install-service` requires `unified-gateway` and `models.json` to already be present next to it. It writes `~/Library/LaunchAgents/local.unified-gateway.plist` and logs to `~/Library/Logs/unified-gateway/`. It manages the gateway process only — load a model separately with `unified-gateway load <name>`.
+
+## Menu bar controller (macOS)
+
+`cmd/menubar` is a standalone tray app (using [`getlantern/systray`](https://github.com/getlantern/systray)) for controlling everything without a terminal:
+
+<p align="center"><img src="docs/menubar-screenshot.png" alt="Unified Gateway menu bar menu" width="260"></p>
+
+Reading it top to bottom:
+
+- **`🟡 no model`** (or `🟢 <model-name>` / `🔴 stopped`) — the gateway adapters' status at a glance. Green means both adapters are up and a model is loaded; yellow means the adapters are up but nothing is loaded yet; red means they're stopped. Below it, **Start/Stop Gateway Adapters** are mutually exclusive — whichever doesn't apply right now is grayed out.
+- **`rapid-mlx`** / **`ds4`** — one entry per local backend, each a submenu with its own **Start**, **Stop**, and a list of the models configured for that backend (`models.json`'s `"backend": "mlx"` / `"ds4"` entries); clicking a model loads it directly. The 🟢/🔴 dot shows whether *that specific* backend is the one currently active — since the two share the same backend port, at most one is ever green at a time.
+- **`Ollama`** — same shape, but for the independently-running Ollama daemon: **Start Ollama**/**Stop Ollama** plus the list of `"backend": "ollama"` models to warm up.
+- **Start All** / **Stop All** — bulk versions of the above.
+- **Quit Menu Bar** — closes only this tray app. It never touches the gateway, the model backend, or Ollama; see [below](#why-two-separate-launchagents) for why.
+
+**Port conflicts are handled at click time, not as a status you have to interpret.** Clicking any "Start" item first checks whether its target port is already occupied by something else; if so, a native confirmation dialog asks whether to stop it and proceed. Switching between models *within* the same backend (clicking a different model in `rapid-mlx`'s own list, say) never prompts — that's the everyday case and stays as frictionless as running `unified-gateway load <name>` directly.
+
+```bash
+go build -o unified-gateway-menubar ./cmd/menubar
+cp unified-gateway-menubar ~/.local/bin/
+```
+
+It's registered as its **own, separate** LaunchAgent from the gateway's:
+
+```bash
+go build -o install-menubar ./cmd/install-menubar
+go build -o uninstall-menubar ./cmd/uninstall-menubar
+
+./install-menubar     # registers + starts now, idempotent
+./uninstall-menubar   # stops + removes
+```
+
+#### Why two separate LaunchAgents
+
+This is deliberate, not an oversight: `local.unified-gateway` (the actual API service) and `local.unified-gateway-menubar` (this tray app) are independent LaunchAgents. The gateway's `KeepAlive` respawns it on crash because other things — Claude Code, OpenCode, a future WebUI — depend on it being up continuously. The menu bar app has no `KeepAlive`: it's a convenience layer, so quitting or crashing it does not restart it automatically, and critically, does **not** affect the gateway, which keeps serving requests either way.
 
 ## Ports
 

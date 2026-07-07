@@ -91,6 +91,7 @@ func loadConfig() (*Config, error) {
 type activeBackend struct {
 	Port          int    `json:"port"`
 	UpstreamModel string `json:"upstream_model,omitempty"`
+	Model         string `json:"model,omitempty"`
 }
 
 func activeBackendPath() string {
@@ -282,7 +283,7 @@ func loadModel(shortName string) error {
 		} else {
 			fmt.Printf("[unified-gateway] %s warmed up on :%d\n", m.Label, cfg.OllamaPort)
 		}
-		if err := writeActiveBackend(activeBackend{Port: cfg.OllamaPort, UpstreamModel: upstreamModel}); err != nil {
+		if err := writeActiveBackend(activeBackend{Port: cfg.OllamaPort, UpstreamModel: upstreamModel, Model: shortName}); err != nil {
 			return fmt.Errorf("failed to record active backend: %w", err)
 		}
 	} else {
@@ -306,7 +307,7 @@ func loadModel(shortName string) error {
 		}
 		fmt.Printf("[unified-gateway] %s ready on :%d\n", m.Label, cfg.BackendPort)
 
-		if err := writeActiveBackend(activeBackend{Port: cfg.BackendPort}); err != nil {
+		if err := writeActiveBackend(activeBackend{Port: cfg.BackendPort, Model: shortName}); err != nil {
 			return fmt.Errorf("failed to record active backend: %w", err)
 		}
 	}
