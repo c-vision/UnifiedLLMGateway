@@ -8,8 +8,8 @@
 
 # Runtime state and logs (regenerated locally, machine-specific)
 /gateway.log
-/active-backend.json
 /load.lock
+/menubar-load.log
 
 # Claude Code workspace metadata
 .claude/

@@ -82,43 +82,135 @@ func loadConfig() (*Config, error) {
 }
 
 // ============================================================================
-// Active backend state — which port (and, for Ollama, which upstream model
-// name) the running gateway should currently forward to. `loadModel` writes
-// this file every time it switches models; the gateway's HTTP handlers read
-// it on every request instead of relying on a value fixed at startup, since
-// Ollama and rapid-mlx/ds4-server live on different, independent ports.
+// Active backend state — determined live, every time, by inspecting the
+// real processes and Ollama's own API. There is deliberately no state
+// file: one was tried (active-backend.json, written by loadModel on every
+// switch) and it went stale the instant a backend process died on its own
+// — crash, manual kill, anything not funneled through loadModel — leaving
+// the gateway confidently routing to (and reporting as "active") a model
+// that no longer existed. Nothing here is cached across calls.
 // ============================================================================
 
 type activeBackend struct {
-	Port          int    `json:"port"`
-	UpstreamModel string `json:"upstream_model,omitempty"`
-	Model         string `json:"model,omitempty"`
+	Port          int    // 0 if nothing is actually live right now
+	UpstreamModel string // set only for Ollama: its own tag for the loaded model
+	Model         string // shortname key in models.json, "" if nothing live matches one
 }
 
-func activeBackendPath() string {
-	return filepath.Join(gatewayDir(), "active-backend.json")
-}
-
-func writeActiveBackend(ab activeBackend) error {
-	data, err := json.Marshal(ab)
+// portOwnerCommand returns the full command line of whichever process is
+// listening on port, or "" if nothing is listening. Restricted to LISTEN
+// sockets only (-sTCP:LISTEN) — without it, lsof also matches outbound
+// client connections (e.g. the gateway's own keep-alive HTTP connection
+// to the backend while proxying), which showed up as a lower PID and got
+// mistaken for the actual owner.
+func portOwnerCommand(port int) string {
+	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN").Output()
 	if err != nil {
-		return err
+		return ""
 	}
-	return os.WriteFile(activeBackendPath(), data, 0644)
+	pids := strings.Fields(string(out))
+	if len(pids) == 0 {
+		return ""
+	}
+	psOut, err := exec.Command("ps", "-p", pids[0], "-o", "command=").Output()
+	if err != nil {
+		return ""
+	}
+	return string(psOut)
 }
 
-// readActiveBackend falls back to fallbackPort (no model-name rewrite) if the
-// state file is missing or invalid, e.g. before the first `load` ever ran.
-func readActiveBackend(fallbackPort int) activeBackend {
-	data, err := os.ReadFile(activeBackendPath())
+// commandFlagValue returns the value following flag in a space-separated
+// command line, or "" if flag isn't present.
+func commandFlagValue(cmd, flag string) string {
+	fields := strings.Fields(cmd)
+	for i, f := range fields {
+		if f == flag && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
+// runningBackendModel inspects whichever real process owns cfg.BackendPort
+// right now and returns the models.json shortname it's serving — read
+// from rapid-mlx's own --served-model-name argument, or ds4-server's
+// --model path matched back against configured ds4 entries. "" if
+// nothing is listening, or it doesn't look like either.
+func runningBackendModel(cfg *Config, port int) string {
+	cmd := portOwnerCommand(port)
+	if cmd == "" {
+		return ""
+	}
+	if strings.Contains(cmd, "rapid-mlx") {
+		return commandFlagValue(cmd, "--served-model-name")
+	}
+	if strings.Contains(cmd, "ds4-server") {
+		path := commandFlagValue(cmd, "--model")
+		for name, m := range cfg.Models {
+			if m.Backend == "ds4" && m.Path == path {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// queryOllamaLoadedModel asks Ollama's own API which model it currently
+// has loaded in memory (its own tag, e.g. "gemma4:31b-mlx"), "" if none.
+func queryOllamaLoadedModel(port int) string {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/ps", port))
 	if err != nil {
-		return activeBackend{Port: fallbackPort}
+		return ""
 	}
-	var ab activeBackend
-	if err := json.Unmarshal(data, &ab); err != nil || ab.Port == 0 {
-		return activeBackend{Port: fallbackPort}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
 	}
-	return ab
+	var parsed struct {
+		Models []struct {
+			Name  string `json:"name"`
+			Model string `json:"model"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil || len(parsed.Models) == 0 {
+		return ""
+	}
+	if parsed.Models[0].Name != "" {
+		return parsed.Models[0].Name
+	}
+	return parsed.Models[0].Model
+}
+
+// resolveActiveBackend determines what's actually running right now, live:
+// whichever of rapid-mlx/ds4-server owns cfg.BackendPort (they're mutually
+// exclusive, sharing one port), or failing that, whatever Ollama reports
+// as loaded via its own API. Falls back to Port: fallbackPort with
+// everything else empty if neither is detected, so a caller can still
+// form a URL even though nothing will answer it.
+func resolveActiveBackend(cfg *Config, fallbackPort int) activeBackend {
+	if cfg != nil {
+		if name := runningBackendModel(cfg, cfg.BackendPort); name != "" {
+			return activeBackend{Port: cfg.BackendPort, Model: name}
+		}
+		if tag := queryOllamaLoadedModel(cfg.OllamaPort); tag != "" {
+			for name, m := range cfg.Models {
+				if m.Backend == "ollama" {
+					wantTag := m.OllamaModel
+					if wantTag == "" {
+						wantTag = name
+					}
+					if wantTag == tag {
+						return activeBackend{Port: cfg.OllamaPort, UpstreamModel: tag, Model: name}
+					}
+				}
+			}
+			// Ollama has something loaded, but it doesn't match any
+			// configured alias — still route requests there, just
+			// without a models.json shortname to report.
+			return activeBackend{Port: cfg.OllamaPort, UpstreamModel: tag}
+		}
+	}
+	return activeBackend{Port: fallbackPort}
 }
 
 // warmOllamaModel triggers Ollama to load the model into memory now, via its
@@ -383,9 +475,6 @@ func loadModelLocked(shortName string) error {
 		} else {
 			fmt.Printf("[unified-gateway] %s warmed up on :%d\n", m.Label, cfg.OllamaPort)
 		}
-		if err := writeActiveBackend(activeBackend{Port: cfg.OllamaPort, UpstreamModel: upstreamModel, Model: shortName}); err != nil {
-			return fmt.Errorf("failed to record active backend: %w", err)
-		}
 	} else {
 		fmt.Printf("[unified-gateway] loading %s (%s)...\n", shortName, m.Label)
 		killPort(cfg.BackendPort)
@@ -406,10 +495,6 @@ func loadModelLocked(shortName string) error {
 			return fmt.Errorf("backend did not become ready on :%d", cfg.BackendPort)
 		}
 		fmt.Printf("[unified-gateway] %s ready on :%d\n", m.Label, cfg.BackendPort)
-
-		if err := writeActiveBackend(activeBackend{Port: cfg.BackendPort, Model: shortName}); err != nil {
-			return fmt.Errorf("failed to record active backend: %w", err)
-		}
 	}
 
 	ensureGatewayRunning()

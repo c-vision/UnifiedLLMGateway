@@ -36,7 +36,7 @@ Unified Gateway does that translation, and adds model lifecycle management on to
                  └─────────────────────────┘
 ```
 
-The gateway process is stateless with respect to which model is loaded — a small state file records the currently active backend (port + upstream model name), written whenever you run `unified-gateway load <model>`. This means switching between a locally-spawned inference process and an independent daemon like Ollama never requires restarting the gateway itself.
+The gateway process is stateless with respect to which model is loaded — every request re-derives which backend to route to live, by inspecting the real process on the backend port (rapid-mlx/ds4-server) or Ollama's own API, never from a cached value. An earlier version wrote a small state file on every `unified-gateway load <model>` and read it back per-request instead; it was removed after that file went stale the instant a backend process died on its own (crash, manual kill) and kept reporting a dead model as active indefinitely. This means switching between a locally-spawned inference process and an independent daemon like Ollama never requires restarting the gateway itself, and a backend dying outside of `load` is reflected immediately rather than papered over by memory of what used to be true.
 
 ## Requirements
 

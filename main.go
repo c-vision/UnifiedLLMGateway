@@ -29,11 +29,12 @@ func randomID(prefix string) string {
 // ============================================================================
 
 type Gateway struct {
-	// backendPort is only the startup fallback, used when no `load` has ever
-	// run yet (active-backend.json missing). Once a model has been loaded,
-	// resolveBackend reads that file on every request instead — Ollama and
-	// rapid-mlx/ds4-server live on different, independent ports, so the
-	// actual backend can change without restarting the gateway.
+	// backendPort is only the startup fallback, used if models.json can't
+	// be read at all when resolveBackend runs — otherwise every call
+	// re-derives the real backend live (see resolveActiveBackend), never
+	// from a state file. A dead backend process used to still get
+	// reported as "active" indefinitely by a stale active-backend.json;
+	// there is no longer anything cached to go stale.
 	backendPort int
 }
 
@@ -47,11 +48,14 @@ func NewGateway() *Gateway {
 	return &Gateway{backendPort: port}
 }
 
-// resolveBackend returns the port (and, if serving via Ollama, the upstream
-// model name to substitute) that `unified-gateway load <shortname>` last
-// selected.
+// resolveBackend determines which backend to route to right now, live —
+// see resolveActiveBackend's doc comment for exactly how.
 func (g *Gateway) resolveBackend() activeBackend {
-	return readActiveBackend(g.backendPort)
+	cfg, err := loadConfig()
+	if err != nil {
+		return activeBackend{Port: g.backendPort}
+	}
+	return resolveActiveBackend(cfg, g.backendPort)
 }
 
 // Middleware to log requests in detail
@@ -500,13 +504,9 @@ func translateOpenAIResponseToAnthropic(openaiResp map[string]interface{}, origi
 // loaded). This is what lets a WebUI populate a model picker without
 // reading models.json off disk itself — the same reason the menu bar
 // needs the file directly today, a remote/separate WebUI process
-// couldn't. "active": true marks whichever one the gateway is actually
-// routing to right now — active-backend.json's Model field alone isn't
-// enough: it's just the last thing loadModel() wrote, and goes stale the
-// moment that backend process dies on its own (crash, manual kill,
-// anything not funneled through loadModel). Trusting the file blindly
-// reported a dead model as "active" indefinitely; checking the port is
-// actually reachable is what makes this reflect reality rather than history.
+// couldn't. "active": true marks whichever one resolveBackend's live
+// detection (real process on the backend port, or Ollama's own API)
+// actually found running right now — never a cached/stale value.
 func (g *Gateway) handleListModels(c *gin.Context) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -514,7 +514,6 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 		return
 	}
 	active := g.resolveBackend()
-	backendAlive := active.Model != "" && portInUse(active.Port)
 
 	data := make([]gin.H, 0, len(cfg.Models))
 	for name, m := range cfg.Models {
@@ -526,7 +525,7 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 			"label":      m.Label,
 			"backend":    m.Backend,
 			"has_vision": m.HasVision,
-			"active":     backendAlive && name == active.Model,
+			"active":     name == active.Model,
 		})
 	}
 	c.JSON(200, gin.H{"object": "list", "data": data})
