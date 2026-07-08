@@ -216,6 +216,13 @@ func runningOllamaModel(port int) string {
 // it's routing to right now (GET /v1/models) — this reflects the
 // gateway's own live backend-selection logic directly, so there's
 // nothing here for the menu bar to cache or get out of sync with.
+//
+// /v1/models now returns the FULL models.json catalog (every configured
+// model, each tagged "active": true/false), not just a single active
+// one — this must find the entry actually marked active, never just
+// take the first item: Go map iteration order (used to build that list
+// server-side) isn't stable across calls, so blindly taking data[0]
+// picks a different, arbitrary model on every poll.
 func gatewayCurrentModel() string {
 	resp, err := http.Get("http://127.0.0.1:8082/v1/models")
 	if err != nil {
@@ -227,13 +234,19 @@ func gatewayCurrentModel() string {
 	}
 	var parsed struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID     string `json:"id"`
+			Active bool   `json:"active"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil || len(parsed.Data) == 0 {
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return ""
 	}
-	return parsed.Data[0].ID
+	for _, m := range parsed.Data {
+		if m.Active {
+			return m.ID
+		}
+	}
+	return ""
 }
 
 func ollamaRunning() bool {
