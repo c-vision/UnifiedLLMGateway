@@ -9,6 +9,7 @@
 # Runtime state and logs (regenerated locally, machine-specific)
 /gateway.log
 /active-backend.json
+/load.lock
 
 # Claude Code workspace metadata
 .claude/

@@ -301,10 +301,61 @@ func ensureBackendLoading(shortName string) {
 	}()
 }
 
+// loadLockPath is a plain empty file used only as an flock() target — its
+// contents are never read or written.
+func loadLockPath() string {
+	return filepath.Join(gatewayDir(), "load.lock")
+}
+
+// withLoadLock serializes every loadModel call across ALL processes, not
+// just goroutines in this one — loadModel can be triggered independently
+// by a direct `unified-gateway load <name>` CLI invocation, the HTTP
+// /v1/models/:id/load endpoint, and the auto-load-on-request path, each
+// potentially a different OS process. Without a cross-process lock, two
+// concurrent loads race on killPort/spawn/writeActiveBackend: observed
+// live (2026-07-08) as active-backend.json reporting "laguna" while the
+// real process on the backend port was actually qw27, because a second
+// load's status write landed after the first one's, even though the
+// first one's process is what actually survived.
+//
+// flock (not a "lockfile exists" check) is what makes this safe rather
+// than just less-likely-to-race: if the process holding the lock dies —
+// crash, kill -9, whatever — the kernel releases it the moment the file
+// descriptor closes. There's no stale lock to detect or clean up by hand.
+// LOCK_EX blocks until the previous load finishes, so a second request
+// queues and runs cleanly afterward instead of failing fast or racing.
+func withLoadLock(fn func() error) error {
+	f, err := os.OpenFile(loadLockPath(), os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("cannot open lock file: %w", err)
+	}
+	defer f.Close()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("cannot acquire load lock: %w", err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
+	return fn()
+}
+
 // loadModel kills whatever is on the backend port and launches the requested
 // model, then makes sure the gateway adapters are up. This is the single
 // entry point that replaces `llm-launch openai/anthropic <shortname>`.
+// Serialized across processes by withLoadLock — see its doc comment.
 func loadModel(shortName string) error {
+	var err error
+	lockErr := withLoadLock(func() error {
+		err = loadModelLocked(shortName)
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
+	}
+	return err
+}
+
+func loadModelLocked(shortName string) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err

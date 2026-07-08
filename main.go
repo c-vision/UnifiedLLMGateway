@@ -494,11 +494,86 @@ func translateOpenAIResponseToAnthropic(openaiResp map[string]interface{}, origi
 // OpenAI Adapter (General Purpose)
 // ============================================================================
 
+// handleListModels returns the full models.json catalog in the standard
+// OpenAI /v1/models shape, unlike a plain passthrough to the active
+// backend (which only ever knows about whichever single model it has
+// loaded). This is what lets a WebUI populate a model picker without
+// reading models.json off disk itself — the same reason the menu bar
+// needs the file directly today, a remote/separate WebUI process
+// couldn't. "active": true marks whichever one the gateway is actually
+// routing to right now, per the same active-backend.json resolveBackend
+// already reads for every request.
+func (g *Gateway) handleListModels(c *gin.Context) {
+	cfg, err := loadConfig()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("cannot read models.json: %v", err)})
+		return
+	}
+	active := g.resolveBackend()
+
+	data := make([]gin.H, 0, len(cfg.Models))
+	for name, m := range cfg.Models {
+		data = append(data, gin.H{
+			"id":         name,
+			"object":     "model",
+			"created":    0,
+			"owned_by":   "unified-gateway",
+			"label":      m.Label,
+			"backend":    m.Backend,
+			"has_vision": m.HasVision,
+			"active":     name == active.Model,
+		})
+	}
+	c.JSON(200, gin.H{"object": "list", "data": data})
+}
+
+// handleLoadModel triggers loading the named model in the background and
+// returns immediately (202) — mirrors how Ollama/LM Studio handle model
+// loads that can take minutes, rather than holding the HTTP connection
+// open for however long that takes. Reuses ensureBackendLoading, the
+// same dedup-guarded loader the auto-load-on-request path already uses,
+// so an explicit load click and an implicit "backend unreachable" retry
+// never race each other into a double load. shortName comes from the
+// path (see handleOpenAIProxy's dispatch — Gin can't mix a static
+// /v1/models/:id/load route with the top-level /*path catch-all, so
+// this is parsed out by hand rather than bound via c.Param).
+func (g *Gateway) handleLoadModel(c *gin.Context, shortName string) {
+	cfg, err := loadConfig()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("cannot read models.json: %v", err)})
+		return
+	}
+	if _, ok := cfg.Models[shortName]; !ok {
+		c.JSON(404, gin.H{"error": fmt.Sprintf("unknown model %q", shortName)})
+		return
+	}
+	ensureBackendLoading(shortName)
+	c.JSON(202, gin.H{"status": "loading", "model": shortName})
+}
+
 // handleOpenAIProxy forwards any method/path to the backend as-is — GET
 // /v1/models (no body) is just as valid as a POST /v1/chat/completions, and
 // forcing JSON binding on every request broke plain GETs that OpenCode and
 // other OpenAI-compatible clients use to list models / check connectivity.
+//
+// /v1/models (catalog) and /v1/models/:id/load are handled here, ahead of
+// the passthrough, rather than as separate Gin routes: Gin's router
+// rejects a static route coexisting with a top-level /*path catch-all at
+// the same level ("catch-all wildcard conflicts with existing path
+// segment"), so the dispatch has to happen inside the one handler that's
+// actually registered.
 func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
+	path := c.Request.URL.Path
+	if c.Request.Method == "GET" && path == "/v1/models" {
+		g.handleListModels(c)
+		return
+	}
+	if c.Request.Method == "POST" && strings.HasPrefix(path, "/v1/models/") && strings.HasSuffix(path, "/load") {
+		shortName := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/models/"), "/load")
+		g.handleLoadModel(c, shortName)
+		return
+	}
+
 	var bodyBytes []byte
 	if c.Request.Body != nil {
 		bodyBytes, _ = io.ReadAll(c.Request.Body)

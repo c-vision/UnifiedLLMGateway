@@ -135,6 +135,22 @@ Example Claude Code settings:
 }
 ```
 
+## Model discovery API
+
+`GET /v1/models` on the OpenAI adapter (`:8082`) returns the full `models.json` catalog in the standard OpenAI shape (`{"object":"list","data":[...]}`), not just whatever the currently active backend happens to report — each entry is tagged `"active": true/false`. This is what lets an external client (a WebUI, say) discover which models exist and which one is loaded right now, without reading `models.json` off disk itself.
+
+```bash
+curl http://localhost:8082/v1/models
+```
+
+`POST /v1/models/<name>/load` triggers loading that model in the background and returns immediately (`202 Accepted`) — it can take minutes, so this doesn't hold the connection open waiting, the same way Ollama/LM Studio handle model loads. Poll `GET /v1/models` afterward (or just retry your `/v1/chat/completions` call — it already self-heals on an unreachable backend) to see when it's ready.
+
+```bash
+curl -X POST http://localhost:8082/v1/models/my-mlx-model/load
+```
+
+Every `loadModel` call — this endpoint, `unified-gateway load` on the command line, and the automatic recovery when a request hits an unreachable backend — is serialized through a cross-process file lock (`load.lock`, next to the binary), so two overlapping load requests from different sources queue up and run cleanly one after another instead of racing on the backend port.
+
 ## Running as a background service (macOS)
 
 Two small standalone commands manage a `launchd` LaunchAgent that starts the gateway at login and restarts it if it crashes:
