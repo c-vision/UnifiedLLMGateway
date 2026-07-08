@@ -501,8 +501,12 @@ func translateOpenAIResponseToAnthropic(openaiResp map[string]interface{}, origi
 // reading models.json off disk itself — the same reason the menu bar
 // needs the file directly today, a remote/separate WebUI process
 // couldn't. "active": true marks whichever one the gateway is actually
-// routing to right now, per the same active-backend.json resolveBackend
-// already reads for every request.
+// routing to right now — active-backend.json's Model field alone isn't
+// enough: it's just the last thing loadModel() wrote, and goes stale the
+// moment that backend process dies on its own (crash, manual kill,
+// anything not funneled through loadModel). Trusting the file blindly
+// reported a dead model as "active" indefinitely; checking the port is
+// actually reachable is what makes this reflect reality rather than history.
 func (g *Gateway) handleListModels(c *gin.Context) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -510,6 +514,7 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 		return
 	}
 	active := g.resolveBackend()
+	backendAlive := active.Model != "" && portInUse(active.Port)
 
 	data := make([]gin.H, 0, len(cfg.Models))
 	for name, m := range cfg.Models {
@@ -521,7 +526,7 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 			"label":      m.Label,
 			"backend":    m.Backend,
 			"has_vision": m.HasVision,
-			"active":     name == active.Model,
+			"active":     backendAlive && name == active.Model,
 		})
 	}
 	c.JSON(200, gin.H{"object": "list", "data": data})

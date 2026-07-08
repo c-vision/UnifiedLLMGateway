@@ -322,6 +322,28 @@ func loadModelAsync(shortName string) {
 	go func() {
 		cmd := exec.Command(gatewayBinary(), "load", shortName)
 		cmd.Dir = binDir()
-		cmd.Run()
+		logPath := filepath.Join(binDir(), "menubar-load.log")
+		if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+			defer logFile.Close()
+		}
+		if err := cmd.Run(); err != nil {
+			// Previously silent — a failure here (including the process
+			// never starting at all, e.g. fork/exec denied) left no trace
+			// anywhere: no crash report (nothing to crash), no gateway log
+			// line (the child never got that far). Surface it visibly
+			// instead of leaving the menu bar looking like it just did
+			// nothing.
+			notify("Unified Gateway", fmt.Sprintf("Failed to load %s: %v", shortName, err))
+		}
 	}()
+}
+
+// notify shows a native macOS banner notification — used for failures that
+// happen in the background (a menu click has no request/response cycle to
+// report back through), so they're not silently invisible.
+func notify(title, message string) {
+	script := fmt.Sprintf(`display notification %s with title %s`, appleScriptQuote(message), appleScriptQuote(title))
+	exec.Command("osascript", "-e", script).Run()
 }
