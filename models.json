@@ -45,7 +45,7 @@
       "backend": "mlx"
     },
     "gemma4": {
-      "path": "~/ai/Models/gemma4:31b-mlx",
+      "path": "~/ai/Models/gemma-4-31b-it-4bit",
       "label": "Gemma 4 31B",
       "backend": "mlx"
     },
@@ -54,10 +54,16 @@
       "backend": "ollama",
       "ollama_model": "gemma4:31b-mlx"
     },
-    "dsv44": {
-      "path": "~/ai/Models/DeepSeek-V4-Flash-4bit",
-      "label": "DeepSeek-V4-Flash-4bit",
+    "laguna": {
+      "path": "~/ai/Models/Laguna-XS-2.1-8bit",
+      "label": "Laguna-XS-2.1-8bit",
       "backend": "mlx"
+    },
+    "gptoss120": {
+      "path": "~/ai/Models/gpt-oss-120b-mxfp4-bf16",
+      "label": "GPT-OSS-120B",
+      "backend": "mlx",
+      "model_type": "gpt_oss"
     }
   }
 }

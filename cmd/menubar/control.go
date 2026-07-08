@@ -49,6 +49,22 @@ func binDir() string {
 func gatewayBinary() string  { return filepath.Join(binDir(), "unified-gateway") }
 func modelsJSONPath() string { return filepath.Join(binDir(), "models.json") }
 
+// relaunchSelf starts a fresh copy of this same menu bar binary — used to
+// pick up models.json changes made externally (e.g. by hand, or by
+// unified-gateway itself), since the model list is only read once at
+// startup and systray has no clean way to rebuild an existing submenu
+// tree in place. The caller is expected to systray.Quit() right after.
+func relaunchSelf() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe)
+	cmd.Dir = binDir()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd.Start()
+}
+
 func loadGWConfig() (*gwConfig, error) {
 	data, err := os.ReadFile(modelsJSONPath())
 	if err != nil {

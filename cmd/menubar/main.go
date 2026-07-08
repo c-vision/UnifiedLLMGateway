@@ -141,6 +141,9 @@ func onReady() {
 	mStopAll := systray.AddMenuItem("Stop All", "Stop gateway adapters, backend, and Ollama")
 	systray.AddSeparator()
 
+	mReload := systray.AddMenuItem("Reload Settings", "Restart this menu bar to pick up changes to models.json")
+	systray.AddSeparator()
+
 	mQuit := systray.AddMenuItem("Quit Menu Bar", "Quits only this menu bar — services keep running")
 
 	go refreshLoop(refreshRefs{
@@ -193,6 +196,12 @@ func onReady() {
 				stopGateway()
 				stopBackend(cfg)
 				stopOllama()
+			case <-mReload.ClickedCh:
+				if err := relaunchSelf(); err != nil {
+					continue // couldn't spawn the replacement — stay running rather than quit into nothing
+				}
+				systray.Quit()
+				return
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
