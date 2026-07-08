@@ -316,10 +316,17 @@ func stopBackend(cfg *gwConfig) {
 
 // loadModelAsync runs `unified-gateway load <shortName>` out-of-process
 // (it can block for up to several minutes while a model warms up) without
-// waiting for it — refreshLoop's polling picks up the result (or lack of
-// one) on its own, so there's no completion callback to wire up here.
+// waiting for it — refreshLoop's polling picks up the resulting status
+// (checkmark, port label) on its own. Clicking a menu item closes the
+// menu immediately (that's macOS, not something we control), which used
+// to look exactly like success even when the load was still running or
+// had failed — these three notifications (start/success/failure) are
+// what tell the user which one it actually was, without needing to leave
+// the menu open to watch it.
 func loadModelAsync(shortName string) {
 	go func() {
+		notify("Unified Gateway", fmt.Sprintf("Loading %s…", shortName))
+
 		cmd := exec.Command(gatewayBinary(), "load", shortName)
 		cmd.Dir = binDir()
 		logPath := filepath.Join(binDir(), "menubar-load.log")
@@ -335,7 +342,9 @@ func loadModelAsync(shortName string) {
 			// line (the child never got that far). Surface it visibly
 			// instead of leaving the menu bar looking like it just did
 			// nothing.
-			notify("Unified Gateway", fmt.Sprintf("Failed to load %s: %v", shortName, err))
+			notify("Unified Gateway", fmt.Sprintf("Failed to load %s — check menubar-load.log", shortName))
+		} else {
+			notify("Unified Gateway", fmt.Sprintf("%s ready", shortName))
 		}
 	}()
 }

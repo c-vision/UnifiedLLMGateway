@@ -54,10 +54,11 @@
       "backend": "ollama",
       "ollama_model": "gemma4:31b-mlx"
     },
-    "laguna": {
-      "path": "~/ai/Models/Laguna-XS-2.1-8bit",
-      "label": "Laguna-XS-2.1-8bit",
-      "backend": "mlx"
+    "mixtral": {
+      "path": "~/ai/Models/Mixtral-8x22B-4bit",
+      "label": "Mixtral 8x22B",
+      "backend": "mlx",
+      "model_type": "mixtral"
     },
     "gptoss120": {
       "path": "~/ai/Models/gpt-oss-120b-mxfp4-bf16",
