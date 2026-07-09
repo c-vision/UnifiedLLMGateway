@@ -286,7 +286,8 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig) (*exec.Cmd, error) 
 	if m.ModelType == "qwen3" || m.ModelType == "qwen3_5" || m.ModelType == "qwen2_moe" {
 		args = append(args, "--no-spec-decode")
 	}
-	args = append(args, "--cache-memory-mb", fmt.Sprintf("%d", mlxCacheReserveMB))
+	cacheMB := mlxCacheReserveMBFor(estimateModelSizeGB(m))
+	args = append(args, "--cache-memory-mb", fmt.Sprintf("%d", cacheMB))
 	// TurboQuant compresses the KV-cache itself (3-4 bit, V-only, K stays
 	// fp16) -- safe on every model, verified directly against qw27
 	// (multimodal, forced text-only). Trades a little long-range
@@ -498,9 +499,10 @@ func loadModelLocked(shortName string) error {
 		if required := estimateModelSizeGB(m); required > 0 {
 			if m.Backend == "mlx" {
 				// rapid-mlx's own prefix-cache reservation, capped via
-				// --cache-memory-mb above -- on top of the model's weights,
-				// not covered by the on-disk size estimate.
-				required += float64(mlxCacheReserveMB) / 1024.0
+				// --cache-memory-mb above (same size-scaled value) -- on
+				// top of the model's weights, not covered by the on-disk
+				// size estimate.
+				required += float64(mlxCacheReserveMBFor(required)) / 1024.0
 			}
 			freeing := runningRSSGB(cfg.BackendPort)
 			if ok, msg := checkMemory(required, freeing); !ok {

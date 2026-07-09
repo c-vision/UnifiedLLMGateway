@@ -19,7 +19,7 @@ import (
 // because this is the one place that actually spawns/kills these
 // processes now.
 
-// mlxCacheReserveMB caps rapid-mlx's memory-aware prefix cache
+// mlxCacheReserveMBFor caps rapid-mlx's memory-aware prefix cache
 // (--cache-memory-mb) instead of leaving it at its default of ~20% of
 // free RAM (--cache-memory-percent 0.20). Observed directly: a persisted
 // on-disk prefix cache (~/.cache/rapid-mlx/prefix_cache/) gets reloaded
@@ -28,10 +28,24 @@ import (
 // top of, not instead of, the weight-size estimate this file already
 // checks, and it scales with however much free RAM happens to be lying
 // around at that moment, making it invisible to a size-based estimate.
-// A fixed cap keeps the caching benefit (repeated/shared prompts still
-// hit) without letting it balloon into the real cause of a "the model
-// froze" report that isn't actually about the model at all.
-const mlxCacheReserveMB = 4096
+//
+// The cap scales inversely with model size instead of one fixed value for
+// everything: on a 128GB machine with ~100GB typically free, a 15GB model
+// has plenty of headroom for a much bigger cache (real benefit: more
+// repeated/shared-prompt hits), while a 70GB+ model already uses most of
+// that headroom on weights alone and should stay conservative. Thresholds
+// are tuned against this catalog's actual on-disk sizes (11-74GB).
+func mlxCacheReserveMBFor(modelSizeGB float64) int {
+	switch {
+	case modelSizeGB < 20:
+		return 16384
+	case modelSizeGB < 45:
+		return 8192
+	default:
+		return 4096
+	}
+}
+
 const memoryMarginFraction = 0.10 // 10% headroom beyond the raw model size
 
 // freeRAMGB returns free+inactive pages from vm_stat, in GB. Apple Silicon
