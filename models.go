@@ -286,6 +286,7 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig) (*exec.Cmd, error) 
 	if m.ModelType == "qwen3" || m.ModelType == "qwen3_5" || m.ModelType == "qwen2_moe" {
 		args = append(args, "--no-spec-decode")
 	}
+	args = append(args, "--cache-memory-mb", fmt.Sprintf("%d", mlxCacheReserveMB))
 
 	cmd := exec.Command(rapidBin, args...)
 	cmd.Env = append(os.Environ(),
@@ -477,6 +478,12 @@ func loadModelLocked(shortName string) error {
 		}
 	} else {
 		if required := estimateModelSizeGB(m); required > 0 {
+			if m.Backend == "mlx" {
+				// rapid-mlx's own prefix-cache reservation, capped via
+				// --cache-memory-mb above -- on top of the model's weights,
+				// not covered by the on-disk size estimate.
+				required += float64(mlxCacheReserveMB) / 1024.0
+			}
 			freeing := runningRSSGB(cfg.BackendPort)
 			if ok, msg := checkMemory(required, freeing); !ok {
 				return fmt.Errorf("%s", msg)

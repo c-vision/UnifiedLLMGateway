@@ -18,6 +18,20 @@ import (
 // This used to live in unicorn-server's Python downloader; it moved here
 // because this is the one place that actually spawns/kills these
 // processes now.
+
+// mlxCacheReserveMB caps rapid-mlx's memory-aware prefix cache
+// (--cache-memory-mb) instead of leaving it at its default of ~20% of
+// free RAM (--cache-memory-percent 0.20). Observed directly: a persisted
+// on-disk prefix cache (~/.cache/rapid-mlx/prefix_cache/) gets reloaded
+// into that reservation on every model start -- 9.4GB for a single 27B
+// model in one test -- on top of the model's own weights. That's on
+// top of, not instead of, the weight-size estimate this file already
+// checks, and it scales with however much free RAM happens to be lying
+// around at that moment, making it invisible to a size-based estimate.
+// A fixed cap keeps the caching benefit (repeated/shared prompts still
+// hit) without letting it balloon into the real cause of a "the model
+// froze" report that isn't actually about the model at all.
+const mlxCacheReserveMB = 4096
 const memoryMarginFraction = 0.10 // 10% headroom beyond the raw model size
 
 // freeRAMGB returns free+inactive pages from vm_stat, in GB. Apple Silicon
