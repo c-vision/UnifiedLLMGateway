@@ -288,11 +288,14 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig) (*exec.Cmd, error) 
 	}
 	cacheMB := mlxCacheReserveMBFor(estimateModelSizeGB(m))
 	args = append(args, "--cache-memory-mb", fmt.Sprintf("%d", cacheMB))
-	// TurboQuant compresses the KV-cache itself (3-4 bit, V-only, K stays
-	// fp16) -- safe on every model, verified directly against qw27
-	// (multimodal, forced text-only). Trades a little long-range
-	// fidelity for meaningfully cheaper memory on large-context workloads.
-	args = append(args, "--kv-cache-turboquant")
+	// TurboQuant (KV-cache quantization) is disabled by default: three
+	// rapid-mlx crashes in 3 days (2026-07-08, 07-09, 07-10) all show the
+	// identical signature -- mlx::core::gpu::check_error aborting on
+	// com.Metal.CompletionQueueDispatch during prefill of a growing prompt.
+	// The two earlier crashes predate TurboQuant entirely, so it isn't the
+	// root cause, but quantization kernels are new/unproven GPU-buffer code
+	// and a plausible way to trip the same underlying Metal fragility --
+	// not worth the risk until upstream rapid-mlx stabilizes this.
 	// PFlash prunes/compresses long prompts before prefill, but rapid-mlx
 	// hard-refuses it for any multimodal model -- even one forced into
 	// --text-only/--no-mllm here, since PFlash's own check looks at the
@@ -377,6 +380,74 @@ var (
 	autoLoadInFlight bool
 )
 
+// crashTracker catches a specific failure mode: rapid-mlx crashing (SIGABRT,
+// a Metal GPU command-buffer error -- see mlxCacheReserveMBFor's doc comment
+// neighbor above) on a growing/heavy prompt. Without this, the sequence is
+// invisible from outside a single request but devastating in aggregate:
+// crash -> connection error -> ensureBackendLoading reloads the model (cold,
+// tens of seconds) -> client retries the same prompt -> crashes again on the
+// same GPU condition -> repeat. Each cycle looks like an ordinary retry;
+// several cycles is the "tens of minutes" a user actually experiences.
+// Tracking lets ensureBackendLoading refuse to keep feeding that loop and
+// surface a real error instead.
+var crashTracker = &crashState{
+	loadedAt:    make(map[string]time.Time),
+	recentCrash: make(map[string][]time.Time),
+}
+
+type crashState struct {
+	mu          sync.Mutex
+	loadedAt    map[string]time.Time
+	recentCrash map[string][]time.Time
+}
+
+// quickCrashWindow: dying this soon after becoming ready looks like the
+// GPU-crash pattern, not an unrelated/deliberate shutdown (e.g. a manual
+// `load` of a different model, which also kills this port).
+const quickCrashWindow = 5 * time.Minute
+
+// crashLoopWindow/crashLoopThreshold: this many quick crashes inside this
+// long a lookback means "reloading isn't helping, stop trying automatically."
+const crashLoopWindow = 10 * time.Minute
+const crashLoopThreshold = 2
+
+func (c *crashState) recordLoad(shortName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadedAt[shortName] = time.Now()
+}
+
+func (c *crashState) recordExit(shortName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	loadedAt, ok := c.loadedAt[shortName]
+	if !ok || time.Since(loadedAt) > quickCrashWindow {
+		return
+	}
+	now := time.Now()
+	cutoff := now.Add(-crashLoopWindow)
+	kept := c.recentCrash[shortName][:0]
+	for _, t := range c.recentCrash[shortName] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	c.recentCrash[shortName] = append(kept, now)
+}
+
+func (c *crashState) isLooping(shortName string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cutoff := time.Now().Add(-crashLoopWindow)
+	count := 0
+	for _, t := range c.recentCrash[shortName] {
+		if t.After(cutoff) {
+			count++
+		}
+	}
+	return count >= crashLoopThreshold
+}
+
 // ensureBackendLoading is called by the request handlers when the backend
 // port turns out to be unreachable — it self-heals by loading the model
 // the client actually asked for, in the background, so a client that never
@@ -388,14 +459,23 @@ var (
 // original HTTP request open for however long a model load takes.
 // autoLoadInFlight prevents piling up redundant loads if several requests
 // arrive (or retry) while one is already in progress.
-func ensureBackendLoading(shortName string) {
+//
+// Returns false (and does NOT reload) if this model has crashed repeatedly
+// right after loading — see crashTracker's doc comment. Reloading again
+// would just feed the same crash-reload-retry-crash loop; the caller should
+// surface a real error instead of implying a retry will help.
+func ensureBackendLoading(shortName string) bool {
 	if shortName == "" {
-		return
+		return false
+	}
+	if crashTracker.isLooping(shortName) {
+		fmt.Printf("[unified-gateway] %q crashed repeatedly right after loading -- not auto-reloading again, needs manual attention\n", shortName)
+		return false
 	}
 	autoLoadMu.Lock()
 	if autoLoadInFlight {
 		autoLoadMu.Unlock()
-		return
+		return true
 	}
 	autoLoadInFlight = true
 	autoLoadMu.Unlock()
@@ -411,6 +491,7 @@ func ensureBackendLoading(shortName string) {
 			fmt.Printf("[unified-gateway] auto-load of %q failed: %v\n", shortName, err)
 		}
 	}()
+	return true
 }
 
 // loadLockPath is a plain empty file used only as an flock() target — its
@@ -522,13 +603,17 @@ func loadModelLocked(shortName string) error {
 		if err != nil {
 			return fmt.Errorf("failed to launch backend: %w", err)
 		}
-		_ = cmd
 
 		fmt.Printf("[unified-gateway] waiting for backend on :%d...\n", cfg.BackendPort)
 		if !waitForPort(cfg.BackendPort, 180*time.Second) {
 			return fmt.Errorf("backend did not become ready on :%d", cfg.BackendPort)
 		}
 		fmt.Printf("[unified-gateway] %s ready on :%d\n", m.Label, cfg.BackendPort)
+		crashTracker.recordLoad(shortName)
+		go func() {
+			cmd.Wait()
+			crashTracker.recordExit(shortName)
+		}()
 	}
 
 	ensureGatewayRunning()

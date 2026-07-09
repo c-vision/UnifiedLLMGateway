@@ -134,8 +134,11 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 	// client to retry, instead of forwarding to a backend that can't serve
 	// this request.
 	if backend.Port != 0 && req.Model != "" && req.Model != backend.Model && req.Model != backend.UpstreamModel {
-		ensureBackendLoading(req.Model)
-		c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active (currently serving %q) -- switch triggered, retry shortly", req.Model, backend.Model)})
+		if ensureBackendLoading(req.Model) {
+			c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active (currently serving %q) -- switch triggered, retry shortly", req.Model, backend.Model)})
+		} else {
+			c.JSON(503, gin.H{"error": fmt.Sprintf("model %q crashed repeatedly right after loading (rapid-mlx/Metal GPU error) -- not retrying automatically, check gateway logs and restart manually", req.Model)})
+		}
 		return
 	}
 
@@ -159,8 +162,11 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 	backendURL := fmt.Sprintf("http://localhost:%d", backend.Port)
 	resp, err := http.Post(backendURL+"/v1/chat/completions", "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		ensureBackendLoading(req.Model)
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
+		if ensureBackendLoading(req.Model) {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
+		} else {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("model %q crashed repeatedly right after loading (rapid-mlx/Metal GPU error) -- not retrying automatically, check gateway logs and restart manually", req.Model)})
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -643,8 +649,11 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 	// wasn't silent like the Anthropic side was -- but it still never
 	// self-healed, just kept returning the backend's 404 forever.
 	if backend.Port != 0 && originalModel != "" && originalModel != backend.Model && originalModel != backend.UpstreamModel {
-		ensureBackendLoading(originalModel)
-		c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active (currently serving %q) -- switch triggered, retry shortly", originalModel, backend.Model)})
+		if ensureBackendLoading(originalModel) {
+			c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active (currently serving %q) -- switch triggered, retry shortly", originalModel, backend.Model)})
+		} else {
+			c.JSON(503, gin.H{"error": fmt.Sprintf("model %q crashed repeatedly right after loading (rapid-mlx/Metal GPU error) -- not retrying automatically, check gateway logs and restart manually", originalModel)})
+		}
 		return
 	}
 
@@ -665,8 +674,11 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 
 	resp, err := http.DefaultClient.Do(proxyReq)
 	if err != nil {
-		ensureBackendLoading(originalModel)
-		c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
+		if ensureBackendLoading(originalModel) {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
+		} else {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("model %q crashed repeatedly right after loading (rapid-mlx/Metal GPU error) -- not retrying automatically, check gateway logs and restart manually", originalModel)})
+		}
 		return
 	}
 	defer resp.Body.Close()
