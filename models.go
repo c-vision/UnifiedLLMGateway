@@ -287,6 +287,24 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig) (*exec.Cmd, error) 
 		args = append(args, "--no-spec-decode")
 	}
 	args = append(args, "--cache-memory-mb", fmt.Sprintf("%d", mlxCacheReserveMB))
+	// TurboQuant compresses the KV-cache itself (3-4 bit, V-only, K stays
+	// fp16) -- safe on every model, verified directly against qw27
+	// (multimodal, forced text-only). Trades a little long-range
+	// fidelity for meaningfully cheaper memory on large-context workloads.
+	args = append(args, "--kv-cache-turboquant")
+	// PFlash prunes/compresses long prompts before prefill, but rapid-mlx
+	// hard-refuses it for any multimodal model -- even one forced into
+	// --text-only/--no-mllm here, since PFlash's own check looks at the
+	// base model's vision capability, not the runtime override. Verified
+	// directly: rapid-mlx exits immediately with "--pflash is not
+	// supported for multimodal models" for qw27, which made it look (from
+	// the gateway's side) like the load silently hung, since the process
+	// died before ever binding the port. Every current qwen3_5 catalog
+	// entry has vision, so this only actually applies to non-vision mlx
+	// models (DeepSeek, GPT-OSS, Mixtral) for now.
+	if !m.HasVision {
+		args = append(args, "--pflash", "auto")
+	}
 
 	cmd := exec.Command(rapidBin, args...)
 	cmd.Env = append(os.Environ(),
