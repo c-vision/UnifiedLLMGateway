@@ -1,9 +1,13 @@
 // install-menubar registers the unified-gateway menu bar controller as its
-// own LaunchAgent, separate from local.unified-gateway. Unlike the gateway
-// service it has no KeepAlive: it's a convenience UI, not a critical
-// service, so if it's quit or crashes it should stay down until the next
-// login rather than respawning — the gateway itself keeps running either
-// way, since the two are deliberately decoupled.
+// own LaunchAgent, separate from local.unified-gateway. It's a convenience
+// UI, not a critical service, so a deliberate Quit (clean exit(0) from
+// systray.Quit()) stays down until the next login rather than respawning —
+// the gateway itself keeps running either way, since the two are
+// deliberately decoupled. KeepAlive's SuccessfulExit=false only covers the
+// other case: getting killed out from under itself (observed in the wild
+// — jetsam SIGTERM'ing it moments after RunAtLoad during a memory-pressure
+// reboot, leaving the tray icon gone until manually restarted), which
+// isn't a deliberate quit and should self-heal.
 package main
 
 import (
@@ -30,6 +34,13 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 	<string>{{.WorkingDir}}</string>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
 	<key>StandardOutPath</key>
 	<string>{{.StdoutLog}}</string>
 	<key>StandardErrorPath</key>
@@ -109,7 +120,8 @@ func main() {
 	fmt.Printf("   binary:  %s\n", binaryPath)
 	fmt.Printf("   plist:   %s\n", plistPath)
 	fmt.Printf("   logs:    %s\n", logDir)
-	fmt.Println("   Starts at login. No KeepAlive: quitting/crashing it does NOT restart it")
-	fmt.Println("   automatically, and does not affect local.unified-gateway, which is a")
-	fmt.Println("   separate, independent LaunchAgent.")
+	fmt.Println("   Starts at login, restarts if killed unexpectedly (e.g. jetsam during a")
+	fmt.Println("   memory-pressure reboot) — but a deliberate Quit stays down until next login.")
+	fmt.Println("   Does not affect local.unified-gateway, which is a separate, independent")
+	fmt.Println("   LaunchAgent.")
 }

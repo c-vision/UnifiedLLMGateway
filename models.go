@@ -476,6 +476,13 @@ func loadModelLocked(shortName string) error {
 			fmt.Printf("[unified-gateway] %s warmed up on :%d\n", m.Label, cfg.OllamaPort)
 		}
 	} else {
+		if required := estimateModelSizeGB(m); required > 0 {
+			freeing := runningRSSGB(cfg.BackendPort)
+			if ok, msg := checkMemory(required, freeing); !ok {
+				return fmt.Errorf("%s", msg)
+			}
+		}
+
 		fmt.Printf("[unified-gateway] loading %s (%s)...\n", shortName, m.Label)
 		killPort(cfg.BackendPort)
 

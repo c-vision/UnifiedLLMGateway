@@ -20,6 +20,7 @@ Unified Gateway does that translation, and adds model lifecycle management on to
 - **Correct Anthropic↔OpenAI translation** — `system` prompt (including prompts Claude Code sends interleaved mid-conversation, which most naive proxies miss), `tools`/`tool_use`/`tool_result`, and full SSE streaming translation in both directions
 - **Conversation-compaction awareness** — recognizes Claude Code's summarization and auto-continue requests so they're observable instead of looking like malformed traffic
 - **Model lifecycle management** — one command to hot-swap the active local model, whether it's served by a locally-spawned process or an already-running daemon like `ollama`, without restarting the gateway
+- **Memory-safety check before every switch** — a locally-spawned model's on-disk weight size is checked against currently-free RAM (plus what killing the outgoing process will free up) before it's touched; a switch that would leave the machine short on memory is refused and the current backend is left running, rather than launching into a machine that's about to swap heavily or get killed by the OS under memory pressure
 - **No port collisions, by design** — the gateway's own adapters, the model backend, and third-party tools (e.g. `ollama`) are always kept on distinct, non-overlapping ports
 - **Optional background service** — install as a macOS `launchd` agent that starts at login and restarts on crash
 - **Optional menu bar controller** — a small native tray app to start/stop the gateway, the model backend, and Ollama, and switch models, without a terminal
@@ -151,6 +152,12 @@ curl -X POST http://localhost:8082/v1/models/my-model/load
 
 Every `loadModel` call — this endpoint, `unified-gateway load` on the command line, and the automatic recovery when a request hits an unreachable backend — is serialized through a cross-process file lock (`load.lock`, next to the binary), so two overlapping load requests from different sources queue up and run cleanly one after another instead of racing on the backend port.
 
+## Memory safety check
+
+Before a `loadModel` call for a locally-spawned backend (`mlx` or `ds4`) kills the outgoing process and launches the new one, it checks whether there's actually enough RAM: the new model's on-disk weight size (summed `.safetensors` shards for `mlx`, the raw `.gguf` size for `ds4`) plus a 10% margin is compared against currently-free RAM (`vm_stat`'s free+inactive pages) plus what killing the current backend will free up (its live RSS). If that doesn't add up, the switch is refused with a clear error and the current backend is left running untouched — rather than launching into a machine that's about to start swapping heavily or get killed outright by macOS under memory pressure (this is what caused a full forced reboot in practice: a large model plus an already-loaded one together left no headroom at all). Ollama is exempt — it manages its own memory and isn't spawned/killed by the gateway.
+
+The on-disk size is a proxy for the model's actual resident memory footprint, not an exact figure, but tracked closely against a hand-maintained table of known model sizes during testing (within ~1-2% in every case checked).
+
 ## Running as a background service (macOS)
 
 Two small standalone commands manage a `launchd` LaunchAgent that starts the gateway at login and restarts it if it crashes:
@@ -199,7 +206,7 @@ go build -o uninstall-menubar ./cmd/uninstall-menubar
 
 #### Why two separate LaunchAgents
 
-This is deliberate, not an oversight: `local.unified-gateway` (the actual API service) and `local.unified-gateway-menubar` (this tray app) are independent LaunchAgents. The gateway's `KeepAlive` respawns it on crash because other things — Claude Code, OpenCode, a future WebUI — depend on it being up continuously. The menu bar app has no `KeepAlive`: it's a convenience layer, so quitting or crashing it does not restart it automatically, and critically, does **not** affect the gateway, which keeps serving requests either way.
+This is deliberate, not an oversight: `local.unified-gateway` (the actual API service) and `local.unified-gateway-menubar` (this tray app) are independent LaunchAgents. Both use `KeepAlive` with `SuccessfulExit: false` — restart on an unexpected kill (crash, or `jetsam` terminating it under memory pressure, observed happening moments after `RunAtLoad` during a memory-pressure-triggered reboot, which otherwise left the tray icon gone until manually restarted), but not after a clean, deliberate exit. For the gateway that means any crash; for the menu bar app specifically, it means "Quit Menu Bar" (`exit(0)`) is respected and stays down until next login, since it's a convenience layer, not something else depends on staying up. Either way, quitting or losing the menu bar app never affects the gateway itself, which keeps serving requests regardless — they're independent LaunchAgents on purpose.
 
 ## Ports
 
