@@ -288,27 +288,34 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig) (*exec.Cmd, error) 
 	}
 	cacheMB := mlxCacheReserveMBFor(estimateModelSizeGB(m))
 	args = append(args, "--cache-memory-mb", fmt.Sprintf("%d", cacheMB))
-	// TurboQuant (KV-cache quantization) is disabled by default: three
-	// rapid-mlx crashes in 3 days (2026-07-08, 07-09, 07-10) all show the
-	// identical signature -- mlx::core::gpu::check_error aborting on
-	// com.Metal.CompletionQueueDispatch during prefill of a growing prompt.
-	// The two earlier crashes predate TurboQuant entirely, so it isn't the
-	// root cause, but quantization kernels are new/unproven GPU-buffer code
-	// and a plausible way to trip the same underlying Metal fragility --
-	// not worth the risk until upstream rapid-mlx stabilizes this.
-	// PFlash prunes/compresses long prompts before prefill, but rapid-mlx
-	// hard-refuses it for any multimodal model -- even one forced into
-	// --text-only/--no-mllm here, since PFlash's own check looks at the
-	// base model's vision capability, not the runtime override. Verified
-	// directly: rapid-mlx exits immediately with "--pflash is not
-	// supported for multimodal models" for qw27, which made it look (from
-	// the gateway's side) like the load silently hung, since the process
-	// died before ever binding the port. Every current qwen3_5 catalog
-	// entry has vision, so this only actually applies to non-vision mlx
-	// models (DeepSeek, GPT-OSS, Mixtral) for now.
-	if !m.HasVision {
-		args = append(args, "--pflash", "auto")
-	}
+	// TurboQuant (KV-cache quantization) re-enabled: the three rapid-mlx
+	// crashes (2026-07-08, 07-09, 07-10) all trace to a documented upstream
+	// MLX bug (rapid-mlx engine_core.py, issue #353 / mlx-lm#1015) --
+	// mlx::core::gpu::check_error throws from Metal's async completion
+	// queue, which can't propagate through Python and aborts the whole
+	// process. TurboQuant isn't the cause (2 of 3 crashes predate it) and
+	// mlx 0.32.0 (PR #3523, "catch error in CommandBuffer and poison the
+	// events") ships the actual fix. TurboQuant matters for exactly the
+	// workload PFlash was supposed to help: it shrinks the KV cache's
+	// per-token footprint, letting more conversation history stay
+	// cache-resident before capacity eviction forces a recompute.
+	args = append(args, "--kv-cache-turboquant")
+	// PFlash OFF by default: rapid-mlx's own metrics.py documents that
+	// "when PFlash compression engages, the prompt skips the prefix-cache
+	// fetch + store paths entirely" -- and qw3627/qw27/etc are
+	// pflash_tier=verified aliases, defaulting to --pflash always. Measured
+	// directly on a real OpenCode session: rapid_mlx_prefix_cache_hits_total
+	// stayed at 0 across 4 consecutive requests (misses=4) once PFlash was
+	// enabled, including trivial one-line follow-ups -- because the
+	// accumulated conversation crosses PFlash's ~32k-token auto-threshold
+	// once, and every request after that bypasses the cache and reprocesses
+	// close to the full history instead of just the new turn's tokens. For
+	// the long, growing, multi-turn agentic sessions this gateway actually
+	// serves (OpenCode/Claude Code), prefix-cache reuse is worth far more
+	// than PFlash's one-shot compression -- so PFlash stays off here, and
+	// is left available as a manual `--pflash auto` opt-in (not wired into
+	// this launcher) for genuine single-shot huge-paste-and-analyze use
+	// without follow-up turns.
 
 	cmd := exec.Command(rapidBin, args...)
 	cmd.Env = append(os.Environ(),
@@ -316,6 +323,15 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig) (*exec.Cmd, error) 
 		"PATH="+filepath.Join(cfg.VenvDir, "bin")+":"+os.Getenv("PATH"),
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// rapid-mlx's own stdout/stderr were previously discarded entirely
+	// (unset Cmd.Stdout/Stderr defaults to os.DevNull) -- every internal
+	// log line (scheduler decisions, cache admission, warnings) was
+	// invisible. Captured here instead of mixed into the gateway's own
+	// log so the two don't interleave.
+	if logFile, err := os.OpenFile(filepath.Join(gatewayDir(), "rapid-mlx.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
