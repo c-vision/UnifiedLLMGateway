@@ -144,13 +144,15 @@ Example Claude Code settings:
 curl http://localhost:8082/v1/models
 ```
 
-`POST /v1/models/<name>/load` triggers loading that model in the background and returns immediately (`202 Accepted`) — it can take minutes, so this doesn't hold the connection open waiting, the same way Ollama/LM Studio handle model loads. Works the same regardless of which backend `<name>` maps to in `models.json` (`mlx`, `ds4`, or `ollama`) — it's the same underlying `loadModel` the CLI and the auto-recovery path already use, so there's nothing backend-specific about this endpoint. Poll `GET /v1/models` afterward (or just retry your `/v1/chat/completions` call — it already self-heals on an unreachable backend) to see when it's ready.
+`POST /v1/models/<name>/load` triggers loading that model in the background and returns immediately (`202 Accepted`) — it can take minutes, so this doesn't hold the connection open waiting, the same way Ollama/LM Studio handle model loads. Works the same regardless of which backend `<name>` maps to in `models.json` (`mlx`, `ds4`, or `ollama`) — it's the same underlying `loadModel` the CLI and the auto-recovery path already use, so there's nothing backend-specific about this endpoint. Poll `GET /v1/models` afterward (or just retry your `/v1/chat/completions` call — it already self-heals on an unreachable backend, and on a *mismatched* one too, see below) to see when it's ready.
 
 ```bash
 curl -X POST http://localhost:8082/v1/models/my-model/load
 ```
 
 Every `loadModel` call — this endpoint, `unified-gateway load` on the command line, and the automatic recovery when a request hits an unreachable backend — is serialized through a cross-process file lock (`load.lock`, next to the binary), so two overlapping load requests from different sources queue up and run cleanly one after another instead of racing on the backend port.
+
+**Self-heals on a mismatched model too, not just an unreachable one.** Both adapters compare the request's `model` field against whichever backend is *actually* active before forwarding anything — if a different model is loaded (left over from another client, a manual test, anything), that used to just get forwarded anyway: rapid-mlx correctly 404s a name it isn't serving, but nothing looked at that and reacted. On the Anthropic adapter specifically this was worse than a plain error — the response translator has no `choices` to work with in an error body, so it returned `{"error":"no choices found"}` wrapped in an HTTP 200, which from Claude Code's side is indistinguishable from getting no response at all. A mismatch now triggers the same `ensureBackendLoading` the unreachable case already used, and returns `503` immediately with a clear message instead of proxying to a backend that can't serve it; the Anthropic adapter also now propagates the backend's real status code on any non-200 response rather than always answering 200. Verified directly: a request naming a model other than whatever was active reproduced the silent failure, then came back fixed — immediate `503`, background switch, and a normal correct response on retry.
 
 ## Memory safety check
 
