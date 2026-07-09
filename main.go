@@ -120,6 +120,25 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 	}
 
 	backend := g.resolveBackend()
+
+	// The active backend serves whatever it was loaded with, regardless of
+	// what model name a request asks for -- rapid-mlx itself rejects a
+	// mismatched name with its own 404 rather than silently switching. Left
+	// unhandled, a stale/different model being active (left over from
+	// another client, a manual test, anything) gets forwarded to anyway,
+	// and on this endpoint the response-translation below turned that 404
+	// into a bare {"error":"no choices found"} with a 200 status -- from
+	// Claude Code's side that reads as no response at all, not an error.
+	// Treat "reachable but serving something else" the same way
+	// "unreachable" is already treated below: trigger a load and tell the
+	// client to retry, instead of forwarding to a backend that can't serve
+	// this request.
+	if backend.Port != 0 && req.Model != "" && req.Model != backend.Model && req.Model != backend.UpstreamModel {
+		ensureBackendLoading(req.Model)
+		c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active (currently serving %q) -- switch triggered, retry shortly", req.Model, backend.Model)})
+		return
+	}
+
 	upstreamModel := req.Model
 	if backend.UpstreamModel != "" {
 		upstreamModel = backend.UpstreamModel
@@ -151,6 +170,15 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 	} else {
 		var openaiResp map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&openaiResp)
+		// Propagate the backend's real status instead of always answering
+		// 200 -- an error body (wrong model, bad request, backend fault)
+		// has no "choices" either, and used to get silently repackaged as
+		// {"error":"no choices found"} with a 200, indistinguishable from
+		// no response at all on the client side.
+		if resp.StatusCode != 200 {
+			c.JSON(resp.StatusCode, gin.H{"error": openaiResp})
+			return
+		}
 		anthroResp := translateOpenAIResponseToAnthropic(openaiResp, req.Model)
 		c.JSON(200, anthroResp)
 	}
@@ -605,6 +633,19 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 				}
 			}
 		}
+	}
+
+	// Same self-heal as the Anthropic adapter: the active backend answers
+	// with whatever it was loaded with regardless of what model a request
+	// names, so a stale/different model already running would otherwise
+	// get forwarded to anyway. This endpoint already propagates the
+	// backend's real status code below, so a mismatch here at least
+	// wasn't silent like the Anthropic side was -- but it still never
+	// self-healed, just kept returning the backend's 404 forever.
+	if backend.Port != 0 && originalModel != "" && originalModel != backend.Model && originalModel != backend.UpstreamModel {
+		ensureBackendLoading(originalModel)
+		c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active (currently serving %q) -- switch triggered, retry shortly", originalModel, backend.Model)})
+		return
 	}
 
 	backendURL := fmt.Sprintf("http://localhost:%d", backend.Port)
