@@ -158,6 +158,8 @@ Before a `loadModel` call for a locally-spawned backend (`mlx` or `ds4`) kills t
 
 The on-disk size is a proxy for the model's actual resident memory footprint, not an exact figure, but tracked closely against a hand-maintained table of known model sizes during testing (within ~1-2% in every case checked).
 
+**rapid-mlx's prefix cache is capped, not left at its default.** rapid-mlx's memory-aware prefix cache defaults to reserving ~20% of *currently free* RAM (`--cache-memory-percent`), and reloads its persisted on-disk cache (`~/.cache/rapid-mlx/prefix_cache/`) into that reservation on every model start — observed directly at 9.4GB for a single 27B model, on top of the model's own weights, and scaling with however much free RAM happens to be around at that moment. That's real memory the weight-size check above never saw, so a switch could look safe and still leave the machine short once the cache system claims its share — worse the less free RAM there already is. `launchMLX` pins `--cache-memory-mb` to a fixed 4096 instead, and the memory check above adds that same fixed amount to its estimate for `mlx` backends so it reflects what rapid-mlx will actually claim.
+
 ## Running as a background service (macOS)
 
 Two small standalone commands manage a `launchd` LaunchAgent that starts the gateway at login and restarts it if it crashes:
