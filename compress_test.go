@@ -127,6 +127,41 @@ func TestCompressMessages_CollapsesDuplicateToolContent(t *testing.T) {
 	}
 }
 
+func TestCompressMessages_CollapsesNearDuplicateToolContent(t *testing.T) {
+	withCompressionEnabled(t)
+	base := strings.Repeat("line of file content\n", 20)
+	// Same file, re-read with only a line number / timestamp different --
+	// byte-for-byte different, so exact dedup alone would miss this.
+	first := "// last modified line 42 at 09:12:03\n" + base
+	second := "// last modified line 57 at 14:38:19\n" + base
+	full := []map[string]interface{}{
+		msg("system", "sys"),
+		msg("tool", first), // stale near-duplicate, should become a placeholder
+		msg("user", "u1"), msg("assistant", "a1"),
+		msg("tool", second), // most recent occurrence
+		msg("user", "u2"), msg("assistant", "a2"), msg("user", "u3"),
+	}
+	if first == second {
+		t.Fatalf("test setup bug: the two contents must NOT be byte-identical")
+	}
+	out, saved := compressMessages(toInterfaceSlice(full))
+	if saved <= 0 {
+		t.Fatalf("expected near-duplicate collapse to save characters, saved=%d", saved)
+	}
+	got := out[1].(map[string]interface{})["content"].(string)
+	if got == first {
+		t.Fatalf("expected the earlier near-duplicate to be replaced with a placeholder")
+	}
+	if !strings.Contains(got, "simile") {
+		t.Fatalf("expected near-duplicate placeholder marker text, got: %s", got)
+	}
+	// The kept (most recent) occurrence must stay fully intact.
+	keptContent := out[4].(map[string]interface{})["content"].(string)
+	if keptContent != second {
+		t.Fatalf("expected the most recent occurrence to remain untouched")
+	}
+}
+
 func TestCompressMessages_NeverTouchesSystemMessages(t *testing.T) {
 	withCompressionEnabled(t)
 	longSystem := strings.Repeat("s", compressTruncateThreshold+1000)

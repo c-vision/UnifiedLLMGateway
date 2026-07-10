@@ -26,7 +26,11 @@ import (
 //
 //  1. Duplicate collapse: the exact same tool-result content re-appearing
 //     verbatim (e.g. the same file read twice across turns) keeps only the
-//     LAST occurrence; earlier ones become a short placeholder.
+//     LAST occurrence; earlier ones become a short placeholder. Also
+//     catches NEAR-duplicates -- the same content re-read with only
+//     numbers/timestamps/whitespace differing (a line-number changed, a
+//     counter incremented) -- via a normalized shape signature, since the
+//     exact-hash check alone misses these; see normalizedShape.
 //  2. Middle truncation: any remaining message body over a size threshold
 //     keeps a head and tail slice with a marker for what was cut -- the
 //     same sink+tail idea PFlash uses inside rapid-mlx, but applied here in
@@ -102,6 +106,42 @@ func contentSignature(content string) string {
 		return content
 	}
 	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// normalizedShape strips digits and collapses whitespace before hashing --
+// catches the same content re-read with only a line number, a timestamp, or
+// an incrementing counter differing (e.g. "example_function_1" vs
+// "example_function_2"), which the exact-hash contentSignature above
+// necessarily misses since even one differing byte changes the hash.
+// Digits are replaced with a single placeholder rune rather than dropped
+// entirely, so "v1" and "v12" don't collapse into the same shape as "v".
+func normalizedShape(content string) string {
+	var b strings.Builder
+	b.Grow(len(content))
+	lastWasDigit := false
+	lastWasSpace := false
+	for _, r := range content {
+		switch {
+		case r >= '0' && r <= '9':
+			if !lastWasDigit {
+				b.WriteRune('#')
+			}
+			lastWasDigit = true
+			lastWasSpace = false
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			if !lastWasSpace {
+				b.WriteRune(' ')
+			}
+			lastWasDigit = false
+			lastWasSpace = true
+		default:
+			b.WriteRune(r)
+			lastWasDigit = false
+			lastWasSpace = false
+		}
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(b.String())))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -252,7 +292,13 @@ func compressMessages(messages []interface{}) ([]interface{}, int) {
 	// Scanning past the cutoff matters: a file re-read in the current
 	// (protected) turn is exactly the common case an earlier stale copy
 	// should be collapsed against.
+	// lastShapeIndexOf tracks the NORMALIZED shape (digits/whitespace
+	// collapsed) separately from the exact hash -- a near-duplicate re-read
+	// (same file, one line-number or timestamp different) won't match
+	// lastIndexOf at all, since a single differing byte changes the exact
+	// hash completely.
 	lastIndexOf := make(map[string]int)
+	lastShapeIndexOf := make(map[string]int)
 	for i := 0; i < len(messages); i++ {
 		msg, ok := messages[i].(map[string]interface{})
 		if !ok || msg["role"] != "tool" {
@@ -263,6 +309,7 @@ func compressMessages(messages []interface{}) ([]interface{}, int) {
 			continue
 		}
 		lastIndexOf[contentSignature(content)] = i
+		lastShapeIndexOf[normalizedShape(content)] = i
 	}
 
 	// Size gate for the sparse-block pass: below sparseGateChars, plain
@@ -296,6 +343,21 @@ func compressMessages(messages []interface{}) ([]interface{}, int) {
 				clone := cloneMessage(msg)
 				placeholder := fmt.Sprintf(
 					"[contenuto duplicato (%d caratteri) -- la versione più recente compare più avanti nella conversazione]",
+					len(content),
+				)
+				clone["content"] = placeholder
+				savedChars += len(content) - len(placeholder)
+				out[i] = clone
+				continue
+			}
+			// Not byte-identical, but the same shape (digits/whitespace
+			// aside) recurs later -- e.g. the same file re-read with one
+			// line number or timestamp changed. Exact dedup above can't
+			// catch this; the normalized signature can.
+			if lastIdx, dup := lastShapeIndexOf[normalizedShape(content)]; dup && lastIdx != i {
+				clone := cloneMessage(msg)
+				placeholder := fmt.Sprintf(
+					"[contenuto simile (%d caratteri, differenze minori come numeri o timestamp) -- la versione più recente compare più avanti nella conversazione]",
 					len(content),
 				)
 				clone["content"] = placeholder
