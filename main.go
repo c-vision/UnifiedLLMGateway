@@ -38,6 +38,22 @@ type Gateway struct {
 	backendPort int
 }
 
+// inferenceMu serializes chat-completion forwarding to the backend --
+// observed directly (2026-07-10): rapid-mlx's own metrics showed
+// requests_running=3, all for the SAME growing OpenCode conversation
+// (message counts climbing 165→167→169... across overlapping [REQUEST]
+// log lines), meaning OpenCode fires the next turn before the model has
+// finished the previous one. rapid-mlx has no admission control of its
+// own -- it just batches whatever arrives -- so those overlapping
+// generations compete for the same single GPU instead of one finishing
+// before the next starts, which only makes an already-large prompt slower
+// for everyone. A single local backend serving one user has nothing to
+// gain from concurrent generations the way a real multi-tenant server
+// does; queuing them one at a time is strictly better here. This does not
+// touch /v1/models, /v1/models/*/load, or /v1/compression -- those stay
+// fast and responsive even while a completion is in flight.
+var inferenceMu sync.Mutex
+
 func NewGateway() *Gateway {
 	port := 11435
 	if cfg, err := loadConfig(); err == nil && cfg.BackendPort != 0 {
@@ -141,6 +157,9 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 		}
 		return
 	}
+
+	inferenceMu.Lock()
+	defer inferenceMu.Unlock()
 
 	upstreamModel := req.Model
 	if backend.UpstreamModel != "" {
@@ -687,6 +706,9 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 		}
 		return
 	}
+
+	inferenceMu.Lock()
+	defer inferenceMu.Unlock()
 
 	backendURL := fmt.Sprintf("http://localhost:%d", backend.Port)
 	targetURL := backendURL + c.Request.URL.Path
