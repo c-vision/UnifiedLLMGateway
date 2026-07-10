@@ -570,6 +570,49 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 
 	data := make([]gin.H, 0, len(cfg.Models))
 	for name, m := range cfg.Models {
+		// Media-kind entries (OCR, etc.) are deliberately excluded here --
+		// see the ModelConfig.Kind doc comment in models.go. They're not a
+		// chat choice; opencode/pi/Claude Code all read this endpoint (or
+		// the same models.json) to populate a model picker, and a "read
+		// this image" model mixed into that list is just noise/confusion.
+		// Use GET /v1/media-models for those instead.
+		if m.Kind == "media" {
+			continue
+		}
+		data = append(data, gin.H{
+			"id":         name,
+			"object":     "model",
+			"created":    0,
+			"owned_by":   "unified-gateway",
+			"label":      m.Label,
+			"backend":    m.Backend,
+			"has_vision": m.HasVision,
+			"active":     name == active.Model,
+		})
+	}
+	c.JSON(200, gin.H{"object": "list", "data": data})
+}
+
+// handleListMediaModels is /v1/media-models' sibling to handleListModels --
+// same shape, but only the entries handleListModels filters OUT (Kind ==
+// "media"). Its own endpoint rather than a query param on /v1/models so a
+// client has to deliberately ask for this list; nothing currently forwards
+// chat completions to a media model, this is discovery-only for now (e.g.
+// the menu bar's separate media section reads it the same way it reads
+// /v1/models for chat entries).
+func (g *Gateway) handleListMediaModels(c *gin.Context) {
+	cfg, err := loadConfig()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("cannot read models.json: %v", err)})
+		return
+	}
+	active := g.resolveBackend()
+
+	data := make([]gin.H, 0)
+	for name, m := range cfg.Models {
+		if m.Kind != "media" {
+			continue
+		}
 		data = append(data, gin.H{
 			"id":         name,
 			"object":     "model",
@@ -623,6 +666,10 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 	path := c.Request.URL.Path
 	if c.Request.Method == "GET" && path == "/v1/models" {
 		g.handleListModels(c)
+		return
+	}
+	if c.Request.Method == "GET" && path == "/v1/media-models" {
+		g.handleListMediaModels(c)
 		return
 	}
 	if c.Request.Method == "POST" && strings.HasPrefix(path, "/v1/models/") && strings.HasSuffix(path, "/load") {

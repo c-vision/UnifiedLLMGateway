@@ -92,8 +92,16 @@ func onReady() {
 		mMissing := systray.AddMenuItem("Backends unavailable (models.json not found)", "")
 		mMissing.Disable()
 	} else {
-		var mlxNames, ds4Names []string
+		var mlxNames, ds4Names, mediaNames []string
 		for n, m := range cfg.Models {
+			// Media-kind entries (OCR, etc.) get their own section below,
+			// regardless of which backend actually serves them -- keeps
+			// them out of the everyday chat-model lists the same way
+			// handleListModels excludes them from /v1/models.
+			if m.Kind == "media" {
+				mediaNames = append(mediaNames, n)
+				continue
+			}
 			switch m.Backend {
 			case "mlx":
 				mlxNames = append(mlxNames, n)
@@ -103,6 +111,7 @@ func onReady() {
 		}
 		sort.Strings(mlxNames)
 		sort.Strings(ds4Names)
+		sort.Strings(mediaNames)
 
 		if len(mlxNames) > 0 {
 			mlxDefault = mlxNames[0]
@@ -120,6 +129,11 @@ func onReady() {
 		mStartDS4 = addStartItem(mDS4, "Start ds4", ds4Default, cfg.BackendPort)
 		mStopDS4 = mDS4.AddSubMenuItem("Stop ds4", fmt.Sprintf("Stop the backend on port %d", cfg.BackendPort))
 		addModelItems(mDS4, cfg, ds4Names, modelItems)
+
+		if len(mediaNames) > 0 {
+			mMedia := systray.AddMenuItem("Media Models (OCR, etc.)", "Special-purpose models kept out of the chat pickers")
+			addModelItems(mMedia, cfg, mediaNames, modelItems)
+		}
 	}
 	systray.AddSeparator()
 

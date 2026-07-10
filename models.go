@@ -26,6 +26,21 @@ import (
 //     gateway's routing at Ollama's own OpenAI-compatible endpoint. OllamaModel
 //     is Ollama's own model tag (e.g. "gemma4:31b-mlx"), which is usually not
 //     the same as the shortname key used to select it.
+//
+// ModelConfig.Kind distinguishes ordinary chat models from special-purpose
+// ones that happen to share the same "mlx"/rapid-mlx serving path but
+// aren't meant to show up in a chat model picker -- OCR being the first
+// example (has_vision:true, but its only use is "read this image", not
+// conversation). Empty/omitted means "chat" -- the vast majority of
+// entries, and the only value that existed before this field was added.
+// "media" entries are still fully loadable/servable exactly like any
+// other mlx/ds4/ollama backend; they're just filtered out of
+// handleListModels (so opencode/pi/Claude Code never see them as a chat
+// choice) and out of the menu bar's normal per-backend model lists,
+// getting their own section instead. This is NOT where image-generation
+// models like FLUX belong -- those need mflux, a completely different
+// runtime the gateway doesn't spawn or route to at all, so they're
+// documented only in models.txt, never added here.
 type ModelConfig struct {
 	Path        string `json:"path,omitempty"`
 	Label       string `json:"label"`
@@ -34,6 +49,7 @@ type ModelConfig struct {
 	HasVision   bool   `json:"has_vision,omitempty"`
 	Ctx         int    `json:"ctx,omitempty"`
 	OllamaModel string `json:"ollama_model,omitempty"`
+	Kind        string `json:"kind,omitempty"`
 }
 
 type Config struct {

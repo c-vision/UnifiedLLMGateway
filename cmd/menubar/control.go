@@ -23,6 +23,7 @@ type modelConfig struct {
 	Label       string `json:"label"`
 	Backend     string `json:"backend"`
 	OllamaModel string `json:"ollama_model,omitempty"`
+	Kind        string `json:"kind,omitempty"`
 }
 
 type gwConfig struct {
