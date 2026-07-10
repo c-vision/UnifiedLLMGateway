@@ -12,6 +12,21 @@ func withCompressionEnabled(t *testing.T) {
 	t.Cleanup(func() { setPromptCompressionEnabled(old) })
 }
 
+func TestDefaultCompressionEnabled(t *testing.T) {
+	cases := map[string]bool{
+		"":      true, // unset -- on by default
+		"1":     true,
+		"true":  true,
+		"0":     false, // explicit opt-out
+		"false": false,
+	}
+	for input, want := range cases {
+		if got := defaultCompressionEnabled(input); got != want {
+			t.Errorf("defaultCompressionEnabled(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
 func msg(role, content string) map[string]interface{} {
 	m := map[string]interface{}{"role": role, "content": content}
 	return m
@@ -25,7 +40,7 @@ func toInterfaceSlice(msgs []map[string]interface{}) []interface{} {
 	return out
 }
 
-func TestCompressMessages_DisabledByDefault(t *testing.T) {
+func TestCompressMessages_NoOpWhenDisabled(t *testing.T) {
 	old := promptCompressionEnabled()
 	setPromptCompressionEnabled(false)
 	t.Cleanup(func() { setPromptCompressionEnabled(old) })

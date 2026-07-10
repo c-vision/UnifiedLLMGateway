@@ -47,13 +47,23 @@ const (
 // compressionEnabled holds live on/off state, toggleable at runtime via
 // GET/POST /v1/compression (see handleOpenAIProxy) -- no restart needed,
 // unlike almost every other knob in this gateway, which all require a
-// process restart to change. Seeded from PROMPT_COMPRESSION=1 at startup
-// so a fixed deployment can still default it on, but the menu bar toggle
-// (cmd/menubar) is the intended day-to-day control.
+// process restart to change. Defaults to ON (the whole point of the
+// feature is to shrink the growing-conversation token/KV-cache cost every
+// long OpenCode/Claude-Code session pays -- that only helps if it's
+// actually running). Set PROMPT_COMPRESSION=0 to start with it off
+// instead; the menu bar toggle (cmd/menubar) always works live regardless
+// of how it started.
 var compressionEnabled atomic.Bool
 
 func init() {
-	compressionEnabled.Store(os.Getenv("PROMPT_COMPRESSION") == "1")
+	compressionEnabled.Store(defaultCompressionEnabled(os.Getenv("PROMPT_COMPRESSION")))
+}
+
+// defaultCompressionEnabled computes the startup default from
+// PROMPT_COMPRESSION's raw value -- factored out so the default itself is
+// directly unit-testable without depending on init()/global-state timing.
+func defaultCompressionEnabled(envVal string) bool {
+	return envVal != "0" && envVal != "false"
 }
 
 func promptCompressionEnabled() bool {
