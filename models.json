@@ -112,6 +112,13 @@
       "backend": "mflux",
       "model_type": "flux2-klein-4b",
       "kind": "media"
+    },
+    "z-image-turbo": {
+      "path": "~/ai/Models/media/image-gen/Z-Image-Turbo-mflux-4bit",
+      "label": "Z-Image-Turbo (4-bit, image generation)",
+      "backend": "mflux",
+      "model_type": "z-image-turbo",
+      "kind": "media"
     }
   }
 }
