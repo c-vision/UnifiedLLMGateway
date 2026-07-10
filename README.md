@@ -71,8 +71,11 @@ Define your models in `models.json`:
 {
   "backend_port": 11435,
   "ollama_port": 11434,
+  "media_backend_port": 11436,
   "venv_dir": "~/path/to/your/mlx/venv",
   "ds4_dir": "~/path/to/ds4-server",
+  "mflux_venv_dir": "~/path/to/your/mflux/venv",
+  "flux_server_script": "~/path/to/flux_server.py",
   "models": {
     "my-mlx-model": {
       "path": "~/models/some-model-4bit",
@@ -85,6 +88,22 @@ Define your models in `models.json`:
       "label": "My Ollama Model",
       "backend": "ollama",
       "ollama_model": "gemma3:27b"
+    },
+    "my-ocr-model": {
+      "path": "~/models/some-vlm-ocr",
+      "label": "My OCR Model",
+      "backend": "mlx",
+      "has_vision": true,
+      "kind": "media",
+      "port": 11436
+    },
+    "my-flux-model": {
+      "path": "~/models/some-flux-checkpoint",
+      "label": "My FLUX Model",
+      "backend": "mflux",
+      "model_type": "dev",
+      "kind": "media",
+      "port": 11437
     }
   }
 }
@@ -92,12 +111,17 @@ Define your models in `models.json`:
 
 | Field | Meaning |
 |---|---|
-| `backend_port` | Port that locally-spawned backends (`mlx`, `ds4`) listen on |
+| `backend_port` | Port that locally-spawned chat backends (`mlx`, `ds4`) listen on |
 | `ollama_port` | Ollama's own port (default `11434`), independent of `backend_port` |
+| `media_backend_port` | Starting port for auto-assigning `"kind":"media"` entries that don't set `"port"` explicitly (`backend_port + 1` by default) |
 | `venv_dir` | Python virtualenv containing your MLX-based server binary |
 | `ds4_dir` | Directory containing a `ds4-server` binary, for GGUF-based models |
-| `models.<name>.backend` | `"mlx"`, `"ds4"`, or `"ollama"` |
+| `mflux_venv_dir` | Python virtualenv with [`mflux`](https://github.com/filipstrand/mflux) installed — only needed if you have `"backend":"mflux"` entries |
+| `flux_server_script` | Path to the persistent server script that wraps mflux's Python API (see "Media models" under [Model discovery API](#model-discovery-api) below) — only needed for `"backend":"mflux"` entries |
+| `models.<name>.backend` | `"mlx"`, `"ds4"`, `"ollama"`, or `"mflux"` (image-generation models only) |
 | `models.<name>.ollama_model` | For `"ollama"` entries: Ollama's own model tag, if it differs from the shortname key |
+| `models.<name>.kind` | `"media"` to keep a non-chat model (OCR, image generation) out of the chat catalog — see below. Omit for ordinary chat models |
+| `models.<name>.port` | Only meaningful with `"kind":"media"` — this model's own dedicated port. Auto-assigned from `media_backend_port` upward if omitted |
 
 ## Usage
 
@@ -252,8 +276,9 @@ This is deliberate, not an oversight: `local.unified-gateway` (the actual API se
 |---|---|---|
 | Anthropic Adapter | `8083` | Claude Code |
 | OpenAI Adapter | `8082` | OpenCode and other OpenAI-compatible clients |
-| Local backend (`mlx`/`ds4`) | `11435` (configurable) | The actively loaded model process |
+| Local backend (`mlx`/`ds4`) | `11435` (configurable) | The actively loaded chat model process |
 | Ollama | `11434` (its own default) | Independent, always-on daemon |
+| Each media model (OCR, FLUX, ...) | `11436`+ (auto-assigned or explicit per entry) | One dedicated port per `"kind":"media"` entry — never shared with the chat backend or each other |
 
 ## Known limitations
 
