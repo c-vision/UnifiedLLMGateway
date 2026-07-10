@@ -156,3 +156,126 @@ func TestCompressMessages_LeavesNonStringContentAlone(t *testing.T) {
 		t.Fatalf("array/structured content must be left untouched, got %T", got)
 	}
 }
+
+func TestQueryKeywords_UsesOnlyMostRecentUserMessage(t *testing.T) {
+	messages := toInterfaceSlice([]map[string]interface{}{
+		msg("user", "stale keyword from an earlier turn"),
+		msg("assistant", "a1"),
+		msg("user", "fix the authentication bug in login handler"),
+	})
+	kw := queryKeywords(messages)
+	if !kw["authentication"] || !kw["login"] || !kw["handler"] {
+		t.Fatalf("expected keywords from the most recent user message, got %v", kw)
+	}
+	if kw["stale"] || kw["earlier"] {
+		t.Fatalf("expected earlier user message to be ignored, got %v", kw)
+	}
+}
+
+func TestQueryKeywords_SkipsShortWords(t *testing.T) {
+	messages := toInterfaceSlice([]map[string]interface{}{
+		msg("user", "fix it in the db"),
+	})
+	kw := queryKeywords(messages)
+	for word := range kw {
+		if len(word) < sparseKeywordMinLen {
+			t.Fatalf("expected short words to be filtered out, found %q", word)
+		}
+	}
+}
+
+func TestSparsifyContent_KeepsSinkAndTailUnconditionally(t *testing.T) {
+	blocks := []string{"sink block with setup code", "irrelevant middle one", "irrelevant middle two", "irrelevant middle three", "tail block with final state"}
+	content := strings.Join(blocks, "\n\n")
+	out, dropped := sparsifyContent(content, map[string]bool{"nomatch": true}, 0.1)
+	if !strings.HasPrefix(out, blocks[0]) {
+		t.Fatalf("expected sink block to be kept at the start, got: %s", out)
+	}
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), blocks[len(blocks)-1]) {
+		t.Fatalf("expected tail block to be kept at the end, got: %s", out)
+	}
+	if dropped <= 0 {
+		t.Fatalf("expected some middle blocks to be dropped at a 0.1 keep ratio, dropped=%d", dropped)
+	}
+}
+
+func TestSparsifyContent_PrefersBlocksMatchingQueryKeywords(t *testing.T) {
+	blocks := []string{
+		"sink",
+		"block about payments and billing logic",
+		"block about the authentication handler and login flow",
+		"block about unrelated logging utilities",
+		"tail",
+	}
+	content := strings.Join(blocks, "\n\n")
+	keywords := map[string]bool{"authentication": true, "login": true}
+	out, _ := sparsifyContent(content, keywords, 0.4)
+	if !strings.Contains(out, "authentication handler and login flow") {
+		t.Fatalf("expected the keyword-matching block to survive, got: %s", out)
+	}
+	if strings.Contains(out, "unrelated logging utilities") {
+		t.Fatalf("expected the non-matching block to be dropped in favor of the matching one, got: %s", out)
+	}
+}
+
+func TestSparsifyContent_FallsBackBelowMinBlocks(t *testing.T) {
+	content := "just one block, no blank-line separators at all"
+	out, dropped := sparsifyContent(content, map[string]bool{}, 0.1)
+	if out != content || dropped != 0 {
+		t.Fatalf("expected no-op when content has too few blocks to sparsify, got out=%q dropped=%d", out, dropped)
+	}
+}
+
+func TestCompressMessages_SparseGateEngagesOnlyAboveSizeThreshold(t *testing.T) {
+	withCompressionEnabled(t)
+
+	// Build one oversized old tool message per test case, sized either
+	// just under or just over sparseGateChars, with distinguishable
+	// keyword-matching and non-matching blocks so we can tell which
+	// compression strategy actually ran.
+	buildOldToolContent := func(totalChars int) string {
+		var b strings.Builder
+		b.WriteString("sink block\n\n")
+		filler := "irrelevant filler line about nothing in particular. "
+		relevant := "relevant block mentioning authentication login handler.\n\n"
+		for b.Len() < totalChars-len(relevant)-200 {
+			b.WriteString(strings.Repeat(filler, 20))
+			b.WriteString("\n\n")
+		}
+		b.WriteString(relevant)
+		b.WriteString("tail block")
+		return b.String()
+	}
+
+	tail := []map[string]interface{}{
+		msg("user", "u1"), msg("assistant", "a1"), msg("user", "u2"),
+		msg("assistant", "a2"), msg("user", "u3"),
+		msg("user", "fix the authentication login handler bug"),
+	}
+
+	t.Run("below gate: plain truncation, keyword block may be cut", func(t *testing.T) {
+		content := buildOldToolContent(compressTruncateThreshold * 2)
+		full := append([]map[string]interface{}{msg("system", "sys"), msg("tool", content)}, tail...)
+		out, saved := compressMessages(toInterfaceSlice(full))
+		if saved <= 0 {
+			t.Fatalf("expected some compression below the gate, saved=%d", saved)
+		}
+		got := out[1].(map[string]interface{})["content"].(string)
+		if strings.Contains(got, "blocchi meno rilevanti omessi") {
+			t.Fatalf("expected plain head+tail truncation below sparseGateChars, got sparse-style output: %s", got[:200])
+		}
+	})
+
+	t.Run("above gate: sparse selection keeps the keyword-matching block", func(t *testing.T) {
+		content := buildOldToolContent(sparseGateChars + 10000)
+		full := append([]map[string]interface{}{msg("system", "sys"), msg("tool", content)}, tail...)
+		out, saved := compressMessages(toInterfaceSlice(full))
+		if saved <= 0 {
+			t.Fatalf("expected compression above the gate, saved=%d", saved)
+		}
+		got := out[1].(map[string]interface{})["content"].(string)
+		if !strings.Contains(got, "authentication login handler") {
+			t.Fatalf("expected sparse selection to keep the query-relevant block, got a content sample: %.300s", got)
+		}
+	})
+}

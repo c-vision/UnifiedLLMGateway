@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"sync/atomic"
 )
 
@@ -42,6 +44,14 @@ const (
 	compressTruncateThreshold = 4000 // chars (~1000 tokens); longer bodies get middle-cut
 	compressHeadKeepChars     = 800
 	compressTailKeepChars     = 800
+
+	// Sparse-block selection: a second, more aggressive pass that only
+	// engages for genuinely large prompts -- see the doc comment above
+	// sparsifyContent for why a size gate instead of always running it.
+	sparseGateChars     = 150000 // ~37k tokens; below this, plain head+tail truncation is enough
+	sparseKeepRatio     = 0.35   // beyond sink+tail, keep enough top-scoring blocks to hit ~35% of original size
+	sparseMinBlocks     = 4      // fewer blocks than this isn't worth block-scoring; falls back to head+tail
+	sparseKeywordMinLen = 4      // query words shorter than this are too generic to score on
 )
 
 // compressionEnabled holds live on/off state, toggleable at runtime via
@@ -103,6 +113,127 @@ func cloneMessage(m map[string]interface{}) map[string]interface{} {
 	return clone
 }
 
+// totalContentChars sums every string-content message's length -- the
+// size-gate check for sparsifyContent, computed once per request rather
+// than tracked incrementally, since compression only runs once per
+// request anyway.
+func totalContentChars(messages []interface{}) int {
+	total := 0
+	for _, m := range messages {
+		msg, ok := m.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if content, ok := msg["content"].(string); ok {
+			total += len(content)
+		}
+	}
+	return total
+}
+
+// queryKeywords pulls a simple keyword set from the most recent user
+// message -- the "query" that sparsifyContent ranks middle blocks
+// against, mirroring PFlash's own "tail-query overlap" scoring
+// criterion (see rapid-mlx's pflash.py compress_tokens) at the text
+// level instead of the token level.
+func queryKeywords(messages []interface{}) map[string]bool {
+	keywords := make(map[string]bool)
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messages[i].(map[string]interface{})
+		if !ok || msg["role"] != "user" {
+			continue
+		}
+		content, ok := msg["content"].(string)
+		if !ok {
+			return keywords
+		}
+		for _, word := range strings.Fields(content) {
+			word = strings.ToLower(strings.Trim(word, ".,;:!?()[]{}\"'`"))
+			if len(word) >= sparseKeywordMinLen {
+				keywords[word] = true
+			}
+		}
+		return keywords // only the single most recent user message
+	}
+	return keywords
+}
+
+// sparsifyContent is the "sparse token" idea from the MSA paper analysis,
+// adapted to something buildable in Go at the text level: instead of a
+// learned sparse-attention mechanism inside the model (which needs the
+// model itself retrained -- not something a gateway can retrofit), split
+// old, oversized content into blocks and keep only the ones that look
+// relevant, the same sink+tail+query-overlap shape PFlash already uses
+// token-side inside rapid-mlx.
+//
+// Only ever called above sparseGateChars (see compressMessages) -- for
+// anything smaller, plain head+tail truncation already does the job with
+// less risk of dropping something that mattered. Blocks are split on
+// blank lines (works reasonably across code and prose without needing a
+// language-aware parser); the first and last block are always kept
+// (sink+tail), and the rest are ranked by how many query keywords they
+// contain, keeping enough top-scoring blocks to hit keepRatio of the
+// original size while preserving original order in the output.
+func sparsifyContent(content string, keywords map[string]bool, keepRatio float64) (string, int) {
+	blocks := strings.Split(content, "\n\n")
+	if len(blocks) < sparseMinBlocks {
+		return content, 0
+	}
+
+	sink := blocks[0]
+	tail := blocks[len(blocks)-1]
+	middle := blocks[1 : len(blocks)-1]
+
+	type scoredBlock struct {
+		text  string
+		score int
+		index int
+	}
+	scored := make([]scoredBlock, len(middle))
+	for i, b := range middle {
+		lower := strings.ToLower(b)
+		score := 0
+		for kw := range keywords {
+			if strings.Contains(lower, kw) {
+				score++
+			}
+		}
+		scored[i] = scoredBlock{text: b, score: score, index: i}
+	}
+	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
+
+	targetChars := int(float64(len(content)) * keepRatio)
+	usedChars := len(sink) + len(tail)
+	kept := make(map[int]bool, len(middle))
+	for _, sb := range scored {
+		if usedChars >= targetChars {
+			break
+		}
+		kept[sb.index] = true
+		usedChars += len(sb.text)
+	}
+
+	var out strings.Builder
+	out.WriteString(sink)
+	out.WriteString("\n\n")
+	droppedBlocks, droppedChars := 0, 0
+	for i, b := range middle {
+		if kept[i] {
+			out.WriteString(b)
+			out.WriteString("\n\n")
+		} else {
+			droppedBlocks++
+			droppedChars += len(b)
+		}
+	}
+	if droppedBlocks > 0 {
+		fmt.Fprintf(&out, "[...%d blocchi meno rilevanti omessi (%d caratteri)...]\n\n", droppedBlocks, droppedChars)
+	}
+	out.WriteString(tail)
+
+	return out.String(), droppedChars
+}
+
 // compressMessages returns a possibly-modified copy of messages plus the
 // approximate number of characters removed. Returns the original slice
 // unmodified (savedChars == 0) when compression is disabled, the
@@ -134,6 +265,18 @@ func compressMessages(messages []interface{}) ([]interface{}, int) {
 		lastIndexOf[contentSignature(content)] = i
 	}
 
+	// Size gate for the sparse-block pass: below sparseGateChars, plain
+	// head+tail truncation (below) already does the job. Computed once,
+	// against the real incoming size, not the already-shrunk size after
+	// dedup -- a prompt right at the boundary shouldn't get a different
+	// truncation strategy per-message depending on how much dedup already
+	// happened to remove earlier in this same pass.
+	sparseGated := totalContentChars(messages) >= sparseGateChars
+	var keywords map[string]bool
+	if sparseGated {
+		keywords = queryKeywords(messages)
+	}
+
 	savedChars := 0
 	out := make([]interface{}, len(messages))
 	copy(out, messages)
@@ -163,6 +306,17 @@ func compressMessages(messages []interface{}) ([]interface{}, int) {
 		}
 
 		if len(content) > compressTruncateThreshold {
+			if sparseGated {
+				if sparsified, dropped := sparsifyContent(content, keywords, sparseKeepRatio); dropped > 0 {
+					clone := cloneMessage(msg)
+					clone["content"] = sparsified
+					savedChars += dropped
+					out[i] = clone
+					continue
+				}
+				// Too few blocks to sparsify usefully -- fall through to
+				// plain head+tail truncation below instead.
+			}
 			clone := cloneMessage(msg)
 			omitted := len(content) - compressHeadKeepChars - compressTailKeepChars
 			clone["content"] = content[:compressHeadKeepChars] +
