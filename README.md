@@ -24,6 +24,7 @@ Unified Gateway does that translation, and adds model lifecycle management on to
 - **No port collisions, by design** — the gateway's own adapters, the model backend, and third-party tools (e.g. `ollama`) are always kept on distinct, non-overlapping ports
 - **Optional background service** — install as a macOS `launchd` agent that starts at login and restarts on crash
 - **Optional menu bar controller** — a small native tray app to start/stop the gateway, the model backend, and Ollama, and switch models, without a terminal
+- **Live-toggleable prompt compression** — shrinks stale, duplicated, or oversized content in older messages before it ever reaches the backend, cutting both prefill time and KV-cache pressure on long-running sessions; on by default, no restart needed to flip it
 
 ## Architecture
 
@@ -163,6 +164,24 @@ The on-disk size is a proxy for the model's actual resident memory footprint, no
 **rapid-mlx's prefix cache is capped, not left at its default.** rapid-mlx's memory-aware prefix cache defaults to reserving ~20% of *currently free* RAM (`--cache-memory-percent`), and reloads its persisted on-disk cache (`~/.cache/rapid-mlx/prefix_cache/`) into that reservation on every model start — observed directly at 9.4GB for a single 27B model, on top of the model's own weights, and scaling with however much free RAM happens to be around at that moment. That's real memory the weight-size check above never saw, so a switch could look safe and still leave the machine short once the cache system claims its share — worse the less free RAM there already is. `launchMLX` pins `--cache-memory-mb` instead of leaving it at that default — and the cap itself scales with model size (`mlxCacheReserveMBFor`): under 20GB gets 16384MB, under 45GB gets 8192MB, anything bigger gets 4096MB. A machine with plenty of free RAM can afford a much bigger cache for a small model (more repeated/shared-prompt hits), but a 70GB+ model already uses most of that headroom on weights alone and should stay conservative. The memory safety check above uses this same scaled value in its required-memory estimate for `mlx` backends, so it still reflects what rapid-mlx will actually claim regardless of which tier applies.
 
 **TurboQuant and PFlash, for large-context workloads.** `launchMLX` also passes `--kv-cache-turboquant` (3-4 bit V-cache compression, K stays fp16) to every mlx model — verified directly, no restrictions found. `--pflash auto` (long-prompt prefill compression) is only added when `!m.HasVision`: rapid-mlx hard-refuses `--pflash` for any multimodal model, even one forced into `--text-only`/`--no-mllm` here, since its own check looks at the base model's vision capability rather than the runtime override. Found this the hard way — with both flags on unconditionally, rapid-mlx exited immediately with `--pflash is not supported for multimodal models`, and since the process died before ever binding the port, it looked from the gateway's side exactly like a hung load rather than a fast, explained failure. Every current `qwen3_5`-type catalog entry has vision, so PFlash presently only actually applies to the non-vision mlx models (DeepSeek, GPT-OSS, Mixtral).
+
+## Prompt compression
+
+Motivated by a real OpenCode session that reached 41,180 prompt tokens almost entirely from re-sent tool-call output accumulated across turns, not from the user's actual questions. `compressMessages` (`compress.go`) shrinks stale content in **older** messages only — the system prompt, tool schemas, and the last 6 messages are always forwarded untouched, so the model always sees full detail for whatever's actually relevant to the current turn. Two independent mechanisms:
+
+1. **Duplicate collapse.** The exact same tool-result content re-appearing verbatim (e.g. the same file read twice) keeps only the last occurrence; earlier ones become a short placeholder. A second pass also catches **near-duplicates** — the same content re-read with only numbers, timestamps, or whitespace differing (a line number changed, a counter incremented) — via a normalized shape signature (digit runs and whitespace collapsed before hashing), since an exact-hash check alone misses these.
+2. **Middle truncation / sparse-block selection.** Any remaining message body over ~4000 characters gets cut. Below ~150,000 total conversation characters, this is a plain head+tail truncation (800 chars kept on each side). Above that gate, a more targeted pass splits the content into blocks (on blank lines), always keeps the first and last block, and ranks the rest by how many keywords from the *current* user question they contain — keeping enough top-scoring blocks to hit ~35% of the original size. This is the same sink+tail+query-overlap idea rapid-mlx's own PFlash uses at the token level (see the KV-cache section above), applied here at the text level in Go before the prompt ever reaches the backend — so it helps every model/backend, not just PFlash-capable non-vision ones.
+
+Both mechanisms are covered by `compress_test.go`; `compress_eval_test.go` and `compress_eval_sparse_test.go` are throwaway (not regression) evaluations that print before/after sizes on realistic conversation shapes — run with e.g. `go test -run TestCompressionEval_SparseAndNearDup -v`.
+
+On by default (`PROMPT_COMPRESSION=0` to start with it off instead), and toggleable live without a restart:
+
+```bash
+curl http://localhost:8082/v1/compression                                  # {"enabled":true,"requests_compressed":N,"chars_saved":N}
+curl -X POST http://localhost:8082/v1/compression -d '{"enabled":false}'    # flip it
+```
+
+The menu bar app (below) exposes the same toggle as a checkbox, with cumulative savings in its tooltip.
 
 ## Running as a background service (macOS)
 
