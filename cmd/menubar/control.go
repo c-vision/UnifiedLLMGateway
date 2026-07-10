@@ -24,6 +24,7 @@ type modelConfig struct {
 	Backend     string `json:"backend"`
 	OllamaModel string `json:"ollama_model,omitempty"`
 	Kind        string `json:"kind,omitempty"`
+	Port        int    `json:"port,omitempty"`
 }
 
 type gwConfig struct {
@@ -368,14 +369,20 @@ func stopBackend(cfg *gwConfig) {
 	killPort(cfg.BackendPort)
 }
 
-// stopMediaBackend kills whatever is on cfg.MediaBackendPort -- always a
-// separate port from cfg.BackendPort (see ModelConfig.Kind's doc comment
-// in the root models.go), so this never touches the chat model's process.
-func stopMediaBackend(cfg *gwConfig) {
-	if cfg == nil || cfg.MediaBackendPort == 0 {
+// stopAllMediaBackends kills every "kind":"media" model's own dedicated
+// port (OCR, each FLUX model, ...) -- used only by "Stop All". Individual
+// Stop clicks (see addIndividualMediaItems in main.go) kill just the one
+// port for that specific model instead; this never touches the chat
+// backend's port, since media models always have their own.
+func stopAllMediaBackends(cfg *gwConfig) {
+	if cfg == nil {
 		return
 	}
-	killPort(cfg.MediaBackendPort)
+	for _, m := range cfg.Models {
+		if m.Kind == "media" && m.Port != 0 {
+			killPort(m.Port)
+		}
+	}
 }
 
 // loadModelAsync runs `unified-gateway load <shortName>` out-of-process

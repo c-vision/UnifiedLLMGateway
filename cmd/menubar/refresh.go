@@ -28,10 +28,7 @@ type refreshRefs struct {
 	cfg           *gwConfig
 	modelItems    map[string]*systray.MenuItem
 	mCompression  *systray.MenuItem
-	mMedia        *systray.MenuItem // nil if no "kind":"media" entries configured
-	mStartMedia   *systray.MenuItem // permanently disabled by addStartItem if mediaDefault == ""
-	mStopMedia    *systray.MenuItem
-	mediaDefault  string // model Start Media Models loads; "" if none configured
+	mediaRefs     map[string]mediaItemRefs // one entry per "kind":"media" model, each on its own port
 }
 
 // setEnabled is a small helper since MenuItem only exposes Enable/Disable,
@@ -133,36 +130,26 @@ func refreshLoop(r refreshRefs) {
 			setEnabled(r.mStopDS4, ds4Active)
 		}
 
-		// Media backend: same live-detection pattern as rapid-mlx/ds4 above,
-		// just pinned to cfg.MediaBackendPort instead of cfg.BackendPort --
-		// entirely independent state, since loading/stopping a media model
-		// never touches the chat backend (see ModelConfig.Kind in the root
-		// models.go). r.mMedia is nil when models.json has no "kind":"media"
-		// entries at all, in which case this whole block is a no-op.
-		var mediaModel string
-		var mediaActive bool
-		if r.cfg != nil && r.mMedia != nil {
-			mlxM, mlxA := runningMLXModel(r.cfg.MediaBackendPort)
-			ds4M, ds4A := runningDS4Model(r.cfg, r.cfg.MediaBackendPort)
-			switch {
-			case mlxA:
-				mediaModel, mediaActive = mlxM, true
-			case ds4A:
-				mediaModel, mediaActive = ds4M, true
+		// Each media model (OCR, each FLUX model) has its own dedicated
+		// port, so its active/inactive state is resolved completely
+		// independently of every other model, chat or media -- just a
+		// plain port-open check per entry, no command-line introspection
+		// needed (mflux-backed servers have no --served-model-name
+		// equivalent to read anyway, and since ports are never shared,
+		// "the port is open" alone is enough to mean "this model is up").
+		for name, refs := range r.mediaRefs {
+			active := portOpen(refs.port)
+			if r.cfg != nil {
+				if m, ok := r.cfg.Models[name]; ok {
+					dot := "🔴"
+					if active {
+						dot = "🟢"
+					}
+					refs.item.SetTitle(fmt.Sprintf("%s %s (%s)", dot, m.Label, name))
+				}
 			}
-
-			switch {
-			case mediaActive && mediaModel != "":
-				r.mMedia.SetTitle(fmt.Sprintf("🟢 Media %s (port %d)", mediaModel, r.cfg.MediaBackendPort))
-			case mediaActive:
-				r.mMedia.SetTitle(fmt.Sprintf("🟢 Media (port %d)", r.cfg.MediaBackendPort))
-			default:
-				r.mMedia.SetTitle("🔴 Media Models")
-			}
-			if r.mediaDefault != "" {
-				setEnabled(r.mStartMedia, !mediaActive)
-			}
-			setEnabled(r.mStopMedia, mediaActive)
+			setEnabled(refs.start, !active)
+			setEnabled(refs.stop, active)
 		}
 
 		ollamaPort := 11434
@@ -183,7 +170,7 @@ func refreshLoop(r refreshRefs) {
 		}
 
 		for name, item := range r.modelItems {
-			checked := (mlxActive && name == mlxModel) || (ds4Active && name == ds4Model) || (mediaActive && name == mediaModel)
+			checked := (mlxActive && name == mlxModel) || (ds4Active && name == ds4Model)
 			if !checked && ollUp && ollamaModel != "" && r.cfg != nil {
 				if m, ok := r.cfg.Models[name]; ok && m.Backend == "ollama" {
 					tag := m.OllamaModel

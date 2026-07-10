@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,19 +29,24 @@ import (
 //     the same as the shortname key used to select it.
 //
 // ModelConfig.Kind distinguishes ordinary chat models from special-purpose
-// ones that happen to share the same "mlx"/rapid-mlx serving path but
-// aren't meant to show up in a chat model picker -- OCR being the first
-// example (has_vision:true, but its only use is "read this image", not
-// conversation). Empty/omitted means "chat" -- the vast majority of
+// ones that aren't meant to show up in a chat model picker -- OCR (backend
+// "mlx", has_vision:true, but its only use is "read this image", not
+// conversation) and image-generation models like FLUX (backend "mflux")
+// both qualify. Empty/omitted means "chat" -- the vast majority of
 // entries, and the only value that existed before this field was added.
-// "media" entries are still fully loadable/servable exactly like any
-// other mlx/ds4/ollama backend; they're just filtered out of
-// handleListModels (so opencode/pi/Claude Code never see them as a chat
-// choice) and out of the menu bar's normal per-backend model lists,
-// getting their own section instead. This is NOT where image-generation
-// models like FLUX belong -- those need mflux, a completely different
-// runtime the gateway doesn't spawn or route to at all, so they're
-// documented only in models.txt, never added here.
+// "media" entries are filtered out of handleListModels (so opencode/pi/
+// Claude Code never see them as a chat choice) and out of the menu bar's
+// normal per-backend model lists, each getting its own section instead.
+//
+// Unlike chat models (which share one pooled Config.BackendPort, since
+// switching between them is meant to be exclusive -- one loaded at a
+// time), every media-kind entry gets its OWN dedicated Port: OCR and each
+// FLUX model can be started, stopped, and auto-loaded on request fully
+// independently of each other and of whatever chat model is active,
+// mirroring how Ollama already runs independent of the chat backend.
+// Port is auto-assigned from Config.MediaBackendPort upward (in sorted
+// model-name order, skipping any explicitly-set ports) if left at 0 --
+// see loadConfig.
 type ModelConfig struct {
 	Path        string `json:"path,omitempty"`
 	Label       string `json:"label"`
@@ -50,6 +56,7 @@ type ModelConfig struct {
 	Ctx         int    `json:"ctx,omitempty"`
 	OllamaModel string `json:"ollama_model,omitempty"`
 	Kind        string `json:"kind,omitempty"`
+	Port        int    `json:"port,omitempty"`
 }
 
 type Config struct {
@@ -58,6 +65,8 @@ type Config struct {
 	MediaBackendPort int                    `json:"media_backend_port,omitempty"`
 	VenvDir          string                 `json:"venv_dir"`
 	DS4Dir           string                 `json:"ds4_dir"`
+	MfluxVenvDir     string                 `json:"mflux_venv_dir,omitempty"`
+	FluxServerScript string                 `json:"flux_server_script,omitempty"`
 	Models           map[string]ModelConfig `json:"models"`
 }
 
@@ -88,22 +97,53 @@ func loadConfig() (*Config, error) {
 	}
 	cfg.VenvDir = expandHome(cfg.VenvDir)
 	cfg.DS4Dir = expandHome(cfg.DS4Dir)
+	cfg.MfluxVenvDir = expandHome(cfg.MfluxVenvDir)
+	cfg.FluxServerScript = expandHome(cfg.FluxServerScript)
 	if cfg.OllamaPort == 0 {
 		cfg.OllamaPort = 11434
 	}
-	// Media-kind models (OCR, etc.) get their own port, never cfg.BackendPort
-	// -- see loadModelLocked and resolveActiveMediaBackend. This is what
-	// lets loading/switching OCR run alongside whatever chat model is
-	// already active on the main backend port, instead of killing it the
-	// way switching between two chat models correctly does. Mirrors how
-	// Ollama already runs independently of the mlx/ds4 backend lifecycle,
-	// just for a locally-spawned process instead of an external daemon.
 	if cfg.MediaBackendPort == 0 {
 		cfg.MediaBackendPort = cfg.BackendPort + 1
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
 		cfg.Models[name] = m
+	}
+	// Every media-kind entry gets its own dedicated port -- OCR and each
+	// FLUX model can be started/stopped/auto-loaded fully independently of
+	// each other and of whatever chat model is active (see ModelConfig's
+	// doc comment). Auto-assign starting at MediaBackendPort, in sorted
+	// name order, for any entry that didn't set one explicitly -- skipping
+	// whatever explicit ports are already taken so two entries never
+	// collide.
+	used := map[int]bool{}
+	var needsPort []string
+	names := make([]string, 0, len(cfg.Models))
+	for name := range cfg.Models {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		m := cfg.Models[name]
+		if m.Kind != "media" {
+			continue
+		}
+		if m.Port != 0 {
+			used[m.Port] = true
+		} else {
+			needsPort = append(needsPort, name)
+		}
+	}
+	next := cfg.MediaBackendPort
+	for _, name := range needsPort {
+		for used[next] {
+			next++
+		}
+		m := cfg.Models[name]
+		m.Port = next
+		cfg.Models[name] = m
+		used[next] = true
+		next++
 	}
 	return &cfg, nil
 }
@@ -240,19 +280,23 @@ func resolveActiveBackend(cfg *Config, fallbackPort int) activeBackend {
 	return activeBackend{Port: fallbackPort}
 }
 
-// resolveActiveMediaBackend is resolveActiveBackend's counterpart for
-// media-kind models (OCR, etc.): checks cfg.MediaBackendPort instead of
-// cfg.BackendPort, entirely independent of whatever chat model is active.
-// No Ollama case here -- media models are always locally-spawned mlx/ds4
-// processes, never an Ollama tag.
-func resolveActiveMediaBackend(cfg *Config) activeBackend {
+// resolveMediaModelActive reports whether shortName (a "kind":"media"
+// entry) is currently active on its own dedicated port (m.Port). Unlike
+// the chat pool, media-kind models never share a port with each other --
+// loadConfig's auto-assignment guarantees each gets its own -- so "is the
+// port open" is sufficient to mean "this specific model is active"; there's
+// no ambiguity to resolve by inspecting a command line the way the shared
+// BackendPort needs. This also covers mflux-backed FLUX servers, which
+// have no --served-model-name equivalent to introspect in the first place.
+func resolveMediaModelActive(cfg *Config, shortName string) bool {
 	if cfg == nil {
-		return activeBackend{}
+		return false
 	}
-	if name := runningBackendModel(cfg, cfg.MediaBackendPort); name != "" {
-		return activeBackend{Port: cfg.MediaBackendPort, Model: name}
+	m, ok := cfg.Models[shortName]
+	if !ok || m.Kind != "media" || m.Port == 0 {
+		return false
 	}
-	return activeBackend{Port: cfg.MediaBackendPort}
+	return portInUse(m.Port)
 }
 
 // warmOllamaModel triggers Ollama to load the model into memory now, via its
@@ -398,6 +442,35 @@ func launchDS4(cfg *Config, m ModelConfig, port int) (*exec.Cmd, error) {
 		"DS4_METAL_FLASH_ATTN_SOURCE="+filepath.Join(cfg.DS4Dir, "metal", "flash_attn.metal"),
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
+
+// launchMflux spawns the persistent Python server (cfg.FluxServerScript,
+// run from cfg.MfluxVenvDir) that wraps mflux's Python API -- mflux itself
+// has no server mode, only one-shot CLI commands that reload the model
+// from disk on every invocation, which would make "start once, generate
+// many times" and auto-load-on-request impossible. m.ModelType carries
+// mflux's own config-name alias (e.g. "dev" for FLUX.1-dev, or
+// "flux2-klein-4b"), which the script uses to pick the right model
+// architecture defaults while still loading actual weights from m.Path
+// (a local directory) instead of triggering a HuggingFace download.
+func launchMflux(cfg *Config, m ModelConfig, port int) (*exec.Cmd, error) {
+	python := filepath.Join(cfg.MfluxVenvDir, "bin", "python")
+	args := []string{
+		cfg.FluxServerScript,
+		"--model-path", m.Path,
+		"--config-name", m.ModelType,
+		"--port", fmt.Sprintf("%d", port),
+	}
+	cmd := exec.Command(python, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if logFile, err := os.OpenFile(filepath.Join(gatewayDir(), "flux-server.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -635,19 +708,22 @@ func loadModelLocked(shortName string) error {
 			fmt.Printf("[unified-gateway] %s warmed up on :%d\n", m.Label, cfg.OllamaPort)
 		}
 	} else {
-		// Media-kind models (OCR, etc.) get their own port and their own
-		// process lifecycle, completely independent of whatever chat model
-		// is active on cfg.BackendPort -- loading/switching one never kills
-		// or even looks at the other. This is the same non-exclusive
-		// behavior Ollama already gets (a request for OCR shouldn't have
-		// any more effect on the chat model than a request for an Ollama
-		// tag does today). Two mlx/ds4 processes can genuinely run at once
+		// Media-kind models (OCR, each FLUX model, etc.) each get their OWN
+		// dedicated port (m.Port, auto-assigned in loadConfig) and their
+		// own process lifecycle, completely independent of whatever chat
+		// model is active on cfg.BackendPort AND of every other media
+		// model -- loading/switching one never kills or even looks at any
+		// other. This is the same non-exclusive behavior Ollama already
+		// gets. Several mlx/ds4/mflux processes can genuinely run at once
 		// as a result; the memory check below only ever credits/kills
-		// whatever was previously on THIS model's own port, never the
-		// other one's.
+		// whatever was previously on THIS model's own port, never another
+		// one's.
 		port := cfg.BackendPort
 		if m.Kind == "media" {
-			port = cfg.MediaBackendPort
+			port = m.Port
+			if port == 0 {
+				return fmt.Errorf("media model %q has no assigned port -- this shouldn't happen (loadConfig assigns one to every media entry)", shortName)
+			}
 		}
 
 		if required := estimateModelSizeGB(m); required > 0 {
@@ -668,9 +744,12 @@ func loadModelLocked(shortName string) error {
 		killPort(port)
 
 		var cmd *exec.Cmd
-		if m.Backend == "ds4" {
+		switch m.Backend {
+		case "ds4":
 			cmd, err = launchDS4(cfg, m, port)
-		} else {
+		case "mflux":
+			cmd, err = launchMflux(cfg, m, port)
+		default:
 			cmd, err = launchMLX(cfg, shortName, m, port)
 		}
 		if err != nil {
@@ -678,7 +757,14 @@ func loadModelLocked(shortName string) error {
 		}
 
 		fmt.Printf("[unified-gateway] waiting for backend on :%d...\n", port)
-		if !waitForPort(port, 180*time.Second) {
+		// FLUX models load their weights AND compile the first time a
+		// generation runs, which can meaningfully exceed rapid-mlx/ds4's
+		// own cold-start time -- give mflux more room before giving up.
+		readyTimeout := 180 * time.Second
+		if m.Backend == "mflux" {
+			readyTimeout = 300 * time.Second
+		}
+		if !waitForPort(port, readyTimeout) {
 			return fmt.Errorf("backend did not become ready on :%d", port)
 		}
 		fmt.Printf("[unified-gateway] %s ready on :%d\n", m.Label, port)
