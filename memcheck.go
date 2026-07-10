@@ -36,13 +36,22 @@ import (
 // that headroom on weights alone and should stay conservative. Thresholds
 // are tuned against this catalog's actual on-disk sizes (11-74GB).
 func mlxCacheReserveMBFor(modelSizeGB float64) int {
+	// Bumped 2026-07-10: observed directly on a real growing OpenCode
+	// conversation -- a 41k-token request MISSED entirely because a
+	// prefix-pressure eviction (cache_max=15.5GB, the previous <20GB
+	// tier) had just evicted the very entry this conversation needed.
+	// TurboQuant (KV-cache quantization, re-enabled the same day) cuts
+	// the per-token footprint, and this machine typically has 30-47GB
+	// free even with heavy IDEs open (checkMemory still refuses a load
+	// outright if that's not true at load time) -- so there's real
+	// headroom to trade for fewer growing-conversation evictions.
 	switch {
 	case modelSizeGB < 20:
-		return 16384
+		return 28672
 	case modelSizeGB < 45:
-		return 8192
+		return 16384
 	default:
-		return 4096
+		return 8192
 	}
 }
 
