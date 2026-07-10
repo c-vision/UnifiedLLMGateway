@@ -160,6 +160,15 @@ Example Claude Code settings:
 }
 ```
 
+**GitHub Copilot CLI** speaks the OpenAI adapter too, via its BYOK (Bring Your Own Key) mode — there's no persisted config file for custom providers, it's read from environment variables at launch:
+
+```bash
+COPILOT_PROVIDER_BASE_URL="http://localhost:8082/v1" \
+COPILOT_PROVIDER_TYPE="openai" \
+COPILOT_MODEL="my-mlx-model" \
+copilot
+```
+
 ## Model discovery API
 
 `GET /v1/models` on the OpenAI adapter (`:8082`) returns the full `models.json` catalog in the standard OpenAI shape (`{"object":"list","data":[...]}`), not just whatever the currently active backend happens to report — each entry is tagged `"active": true/false`. This is what lets an external client (a WebUI, say) discover which models exist and which one is loaded right now, without reading `models.json` off disk itself.

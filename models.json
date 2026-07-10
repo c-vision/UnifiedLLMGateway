@@ -119,6 +119,13 @@
       "backend": "mflux",
       "model_type": "z-image-turbo",
       "kind": "media"
+    },
+    "qwen-image": {
+      "path": "~/ai/Models/media/image-gen/Qwen-Image-2512-4bit",
+      "label": "Qwen-Image-2512 (4-bit, image generation)",
+      "backend": "mflux",
+      "model_type": "qwen-image",
+      "kind": "media"
     }
   }
 }
