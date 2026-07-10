@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,15 +37,16 @@ import (
 // Claude Code never see them as a chat choice) and out of the menu bar's
 // normal per-backend model lists, each getting its own section instead.
 //
-// Unlike chat models (which share one pooled Config.BackendPort, since
-// switching between them is meant to be exclusive -- one loaded at a
-// time), every media-kind entry gets its OWN dedicated Port: OCR and each
-// FLUX model can be started, stopped, and auto-loaded on request fully
-// independently of each other and of whatever chat model is active,
-// mirroring how Ollama already runs independent of the chat backend.
-// Port is auto-assigned from Config.MediaBackendPort upward (in sorted
-// model-name order, skipping any explicitly-set ports) if left at 0 --
-// see loadConfig.
+// Media-kind entries form two SHARED pools, mirroring exactly how chat
+// models already work: switching within a pool is exclusive (loading one
+// entry kills whatever else was on that pool's port), but the two pools
+// -- and the chat pool -- are fully independent of each other. OCR-like
+// entries (any backend except "mflux") share Config.MediaBackendPort;
+// FLUX-family entries (backend "mflux") share Config.FluxBackendPort.
+// Requesting/loading OCR never touches a FLUX model or the active chat
+// model, and vice versa -- but two OCR-like models (or two FLUX models)
+// can't run at once any more than two chat models can, since rapid-mlx/
+// ds4-server/the flux server each only serve one model per process.
 type ModelConfig struct {
 	Path        string `json:"path,omitempty"`
 	Label       string `json:"label"`
@@ -56,13 +56,13 @@ type ModelConfig struct {
 	Ctx         int    `json:"ctx,omitempty"`
 	OllamaModel string `json:"ollama_model,omitempty"`
 	Kind        string `json:"kind,omitempty"`
-	Port        int    `json:"port,omitempty"`
 }
 
 type Config struct {
 	BackendPort      int                    `json:"backend_port"`
 	OllamaPort       int                    `json:"ollama_port,omitempty"`
 	MediaBackendPort int                    `json:"media_backend_port,omitempty"`
+	FluxBackendPort  int                    `json:"flux_backend_port,omitempty"`
 	VenvDir          string                 `json:"venv_dir"`
 	DS4Dir           string                 `json:"ds4_dir"`
 	MfluxVenvDir     string                 `json:"mflux_venv_dir,omitempty"`
@@ -105,47 +105,27 @@ func loadConfig() (*Config, error) {
 	if cfg.MediaBackendPort == 0 {
 		cfg.MediaBackendPort = cfg.BackendPort + 1
 	}
+	if cfg.FluxBackendPort == 0 {
+		cfg.FluxBackendPort = cfg.MediaBackendPort + 1
+	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
 		cfg.Models[name] = m
 	}
-	// Every media-kind entry gets its own dedicated port -- OCR and each
-	// FLUX model can be started/stopped/auto-loaded fully independently of
-	// each other and of whatever chat model is active (see ModelConfig's
-	// doc comment). Auto-assign starting at MediaBackendPort, in sorted
-	// name order, for any entry that didn't set one explicitly -- skipping
-	// whatever explicit ports are already taken so two entries never
-	// collide.
-	used := map[int]bool{}
-	var needsPort []string
-	names := make([]string, 0, len(cfg.Models))
-	for name := range cfg.Models {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		m := cfg.Models[name]
-		if m.Kind != "media" {
-			continue
-		}
-		if m.Port != 0 {
-			used[m.Port] = true
-		} else {
-			needsPort = append(needsPort, name)
-		}
-	}
-	next := cfg.MediaBackendPort
-	for _, name := range needsPort {
-		for used[next] {
-			next++
-		}
-		m := cfg.Models[name]
-		m.Port = next
-		cfg.Models[name] = m
-		used[next] = true
-		next++
-	}
 	return &cfg, nil
+}
+
+// mediaPoolPort returns which shared port a "kind":"media" entry belongs
+// to: FLUX-family models (backend "mflux") share Config.FluxBackendPort,
+// every other media-kind model (OCR, etc.) shares Config.MediaBackendPort.
+// Both are genuine pools, not per-model ports -- loading one entry within
+// a pool is exclusive within that pool, exactly like the chat pool, but
+// the two media pools and the chat pool never affect each other.
+func mediaPoolPort(cfg *Config, m ModelConfig) int {
+	if m.Backend == "mflux" {
+		return cfg.FluxBackendPort
+	}
+	return cfg.MediaBackendPort
 }
 
 // ============================================================================
@@ -198,11 +178,20 @@ func commandFlagValue(cmd, flag string) string {
 	return ""
 }
 
-// runningBackendModel inspects whichever real process owns cfg.BackendPort
-// right now and returns the models.json shortname it's serving — read
-// from rapid-mlx's own --served-model-name argument, or ds4-server's
-// --model path matched back against configured ds4 entries. "" if
-// nothing is listening, or it doesn't look like either.
+// runningBackendModel inspects whichever real process owns port right now
+// and returns the models.json shortname it's serving. Works for any of the
+// three locally-spawned backend types, on whichever port they happen to be
+// asked about (the chat pool's BackendPort, the OCR-like pool's
+// MediaBackendPort, or the FLUX pool's FluxBackendPort -- all three share
+// this same introspection, never a cached value):
+//   - rapid-mlx: reads its own --served-model-name argument directly
+//   - ds4-server: has no equivalent flag, so its --model path is matched
+//     back against configured "ds4" entries
+//   - flux_server.py (mflux): same idea as ds4 -- no --served-model-name
+//     equivalent, so its --model-path is matched back against configured
+//     "mflux" entries
+//
+// "" if nothing is listening, or it doesn't look like any of the three.
 func runningBackendModel(cfg *Config, port int) string {
 	cmd := portOwnerCommand(port)
 	if cmd == "" {
@@ -215,6 +204,14 @@ func runningBackendModel(cfg *Config, port int) string {
 		path := commandFlagValue(cmd, "--model")
 		for name, m := range cfg.Models {
 			if m.Backend == "ds4" && m.Path == path {
+				return name
+			}
+		}
+	}
+	if strings.Contains(cmd, "flux_server") {
+		path := commandFlagValue(cmd, "--model-path")
+		for name, m := range cfg.Models {
+			if m.Backend == "mflux" && m.Path == path {
 				return name
 			}
 		}
@@ -280,23 +277,33 @@ func resolveActiveBackend(cfg *Config, fallbackPort int) activeBackend {
 	return activeBackend{Port: fallbackPort}
 }
 
-// resolveMediaModelActive reports whether shortName (a "kind":"media"
-// entry) is currently active on its own dedicated port (m.Port). Unlike
-// the chat pool, media-kind models never share a port with each other --
-// loadConfig's auto-assignment guarantees each gets its own -- so "is the
-// port open" is sufficient to mean "this specific model is active"; there's
-// no ambiguity to resolve by inspecting a command line the way the shared
-// BackendPort needs. This also covers mflux-backed FLUX servers, which
-// have no --served-model-name equivalent to introspect in the first place.
-func resolveMediaModelActive(cfg *Config, shortName string) bool {
+// resolveActiveMediaPool is resolveActiveBackend's counterpart for a media
+// pool's shared port (Config.MediaBackendPort for OCR-like entries,
+// Config.FluxBackendPort for FLUX-family ones) -- exclusive within that
+// pool exactly like the chat pool is within itself, but fully independent
+// of the chat pool and of the OTHER media pool. No Ollama case here --
+// media models are always locally-spawned processes, never an Ollama tag.
+func resolveActiveMediaPool(cfg *Config, poolPort int) activeBackend {
+	if cfg == nil || poolPort == 0 {
+		return activeBackend{Port: poolPort}
+	}
+	if name := runningBackendModel(cfg, poolPort); name != "" {
+		return activeBackend{Port: poolPort, Model: name}
+	}
+	return activeBackend{Port: poolPort}
+}
+
+// isMediaModelActive reports whether shortName (a "kind":"media" entry) is
+// specifically the one active on its pool's shared port right now.
+func isMediaModelActive(cfg *Config, shortName string) bool {
 	if cfg == nil {
 		return false
 	}
 	m, ok := cfg.Models[shortName]
-	if !ok || m.Kind != "media" || m.Port == 0 {
+	if !ok || m.Kind != "media" {
 		return false
 	}
-	return portInUse(m.Port)
+	return resolveActiveMediaPool(cfg, mediaPoolPort(cfg, m)).Model == shortName
 }
 
 // warmOllamaModel triggers Ollama to load the model into memory now, via its
@@ -708,22 +715,19 @@ func loadModelLocked(shortName string) error {
 			fmt.Printf("[unified-gateway] %s warmed up on :%d\n", m.Label, cfg.OllamaPort)
 		}
 	} else {
-		// Media-kind models (OCR, each FLUX model, etc.) each get their OWN
-		// dedicated port (m.Port, auto-assigned in loadConfig) and their
-		// own process lifecycle, completely independent of whatever chat
-		// model is active on cfg.BackendPort AND of every other media
-		// model -- loading/switching one never kills or even looks at any
-		// other. This is the same non-exclusive behavior Ollama already
-		// gets. Several mlx/ds4/mflux processes can genuinely run at once
-		// as a result; the memory check below only ever credits/kills
-		// whatever was previously on THIS model's own port, never another
-		// one's.
+		// Media-kind models share one of two POOLS (OCR-like on
+		// MediaBackendPort, FLUX-family on FluxBackendPort) -- switching
+		// within a pool is exclusive, exactly like the chat pool, but
+		// loading/switching a media model never touches the chat backend
+		// or the OTHER media pool. This is the same non-exclusive
+		// relationship Ollama already has with the chat backend, just
+		// generalized to two independent pools instead of one daemon. The
+		// memory check below only ever credits/kills whatever was
+		// previously on THIS pool's port, never the chat backend's or the
+		// other pool's.
 		port := cfg.BackendPort
 		if m.Kind == "media" {
-			port = m.Port
-			if port == 0 {
-				return fmt.Errorf("media model %q has no assigned port -- this shouldn't happen (loadConfig assigns one to every media entry)", shortName)
-			}
+			port = mediaPoolPort(cfg, m)
 		}
 
 		if required := estimateModelSizeGB(m); required > 0 {

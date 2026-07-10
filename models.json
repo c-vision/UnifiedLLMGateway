@@ -4,6 +4,7 @@
   "venv_dir": "~/ai/env312",
   "ds4_dir": "~/ds4",
   "media_backend_port": 11436,
+  "flux_backend_port": 11437,
   "mflux_venv_dir": "~/ai/env-mflux",
   "flux_server_script": "~/ai/flux-server/server.py",
   "models": {
@@ -96,23 +97,20 @@
       "backend": "mlx",
       "model_type": "deepseekocr",
       "has_vision": true,
-      "kind": "media",
-      "port": 11436
+      "kind": "media"
     },
     "flux1-dev": {
       "path": "~/ai/Models/media/image-gen/FLUX.1-dev-4bit",
       "label": "FLUX.1-dev (4-bit, image generation)",
       "backend": "mflux",
       "model_type": "dev",
-      "kind": "media",
-      "port": 11437
+      "kind": "media"
     },
     "flux2-klein-4b": {
       "path": "~/ai/Models/media/image-gen/FLUX.2-Klein-4B-4bit",
       "label": "FLUX.2-klein-4B (4-bit, image generation)",
       "backend": "mflux",
       "model_type": "flux2-klein-4b",
-      "port": 11438,
       "kind": "media"
     }
   }

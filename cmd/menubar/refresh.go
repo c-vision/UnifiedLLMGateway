@@ -28,7 +28,14 @@ type refreshRefs struct {
 	cfg           *gwConfig
 	modelItems    map[string]*systray.MenuItem
 	mCompression  *systray.MenuItem
-	mediaRefs     map[string]mediaItemRefs // one entry per "kind":"media" model, each on its own port
+	mOCR          *systray.MenuItem // nil if no OCR-like "kind":"media" entries configured
+	mStartOCR     *systray.MenuItem // permanently disabled by addStartItem if ocrDefault == ""
+	mStopOCR      *systray.MenuItem
+	ocrDefault    string            // model Start OCR loads; "" if none configured
+	mFlux         *systray.MenuItem // nil if no "backend":"mflux" entries configured
+	mStartFlux    *systray.MenuItem // permanently disabled by addStartItem if fluxDefault == ""
+	mStopFlux     *systray.MenuItem
+	fluxDefault   string // model Start FLUX loads; "" if none configured
 }
 
 // setEnabled is a small helper since MenuItem only exposes Enable/Disable,
@@ -130,26 +137,51 @@ func refreshLoop(r refreshRefs) {
 			setEnabled(r.mStopDS4, ds4Active)
 		}
 
-		// Each media model (OCR, each FLUX model) has its own dedicated
-		// port, so its active/inactive state is resolved completely
-		// independently of every other model, chat or media -- just a
-		// plain port-open check per entry, no command-line introspection
-		// needed (mflux-backed servers have no --served-model-name
-		// equivalent to read anyway, and since ports are never shared,
-		// "the port is open" alone is enough to mean "this model is up").
-		for name, refs := range r.mediaRefs {
-			active := portOpen(refs.port)
-			if r.cfg != nil {
-				if m, ok := r.cfg.Models[name]; ok {
-					dot := "🔴"
-					if active {
-						dot = "🟢"
-					}
-					refs.item.SetTitle(fmt.Sprintf("%s %s (%s)", dot, m.Label, name))
+		// OCR-like and FLUX-family media models are each their own POOL,
+		// same live-detection pattern as rapid-mlx/ds4 above -- exclusive
+		// switching within the pool, but the two pools (and the chat pool)
+		// never affect each other. runningFluxModel mirrors runningDS4Model:
+		// mflux's server has no --served-model-name equivalent, so its
+		// --model-path is matched back against configured "mflux" entries.
+		var ocrModel string
+		var ocrActive bool
+		if r.cfg != nil && r.mOCR != nil {
+			ocrModel, ocrActive = runningMLXModel(r.cfg.MediaBackendPort)
+			if !ocrActive {
+				if m, active := runningDS4Model(r.cfg, r.cfg.MediaBackendPort); active {
+					ocrModel, ocrActive = m, true
 				}
 			}
-			setEnabled(refs.start, !active)
-			setEnabled(refs.stop, active)
+			switch {
+			case ocrActive && ocrModel != "":
+				r.mOCR.SetTitle(fmt.Sprintf("🟢 OCR %s (port %d)", ocrModel, r.cfg.MediaBackendPort))
+			case ocrActive:
+				r.mOCR.SetTitle(fmt.Sprintf("🟢 OCR (port %d)", r.cfg.MediaBackendPort))
+			default:
+				r.mOCR.SetTitle("🔴 OCR")
+			}
+			if r.ocrDefault != "" {
+				setEnabled(r.mStartOCR, !ocrActive)
+			}
+			setEnabled(r.mStopOCR, ocrActive)
+		}
+
+		var fluxModel string
+		var fluxActive bool
+		if r.cfg != nil && r.mFlux != nil {
+			fluxModel, fluxActive = runningFluxModel(r.cfg, r.cfg.FluxBackendPort)
+			switch {
+			case fluxActive && fluxModel != "":
+				r.mFlux.SetTitle(fmt.Sprintf("🟢 FLUX %s (port %d)", fluxModel, r.cfg.FluxBackendPort))
+			case fluxActive:
+				r.mFlux.SetTitle(fmt.Sprintf("🟢 FLUX (port %d)", r.cfg.FluxBackendPort))
+			default:
+				r.mFlux.SetTitle("🔴 FLUX (Image Generation)")
+			}
+			if r.fluxDefault != "" {
+				setEnabled(r.mStartFlux, !fluxActive)
+			}
+			setEnabled(r.mStopFlux, fluxActive)
 		}
 
 		ollamaPort := 11434
@@ -170,7 +202,8 @@ func refreshLoop(r refreshRefs) {
 		}
 
 		for name, item := range r.modelItems {
-			checked := (mlxActive && name == mlxModel) || (ds4Active && name == ds4Model)
+			checked := (mlxActive && name == mlxModel) || (ds4Active && name == ds4Model) ||
+				(ocrActive && name == ocrModel) || (fluxActive && name == fluxModel)
 			if !checked && ollUp && ollamaModel != "" && r.cfg != nil {
 				if m, ok := r.cfg.Models[name]; ok && m.Backend == "ollama" {
 					tag := m.OllamaModel

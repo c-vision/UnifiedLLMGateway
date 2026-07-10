@@ -70,54 +70,6 @@ func addStartItem(parent *systray.MenuItem, label, targetModel string, port int)
 	return item
 }
 
-// mediaItemRefs bundles what refreshLoop needs to keep one individually-
-// controlled media model's menu entry in sync -- port is fixed at
-// creation time (each media model gets its own dedicated port, unlike
-// the shared chat/backend pool), so refreshLoop only ever needs to poll
-// that one port to know this specific entry's live state.
-type mediaItemRefs struct {
-	item  *systray.MenuItem
-	start *systray.MenuItem
-	stop  *systray.MenuItem
-	port  int
-}
-
-// addIndividualMediaItems adds one top-level menu entry PER model in
-// names, each with its own Start/Stop pair -- unlike addModelItems (which
-// assumes every model in the list shares one pooled port, so only needs a
-// single click-to-load per item) or addStartItem (one Start/Stop pair for
-// an entire section). Every "kind":"media" entry gets its own dedicated
-// port (see ModelConfig.Port in the root models.go), so OCR and each FLUX
-// model must be startable, stoppable, and status-reflected (🟢/🔴 in its
-// own title, same convention as rapid-mlx/ds4/Ollama above) completely
-// independently of one another and of whatever chat model is active --
-// this is what makes that possible in the menu itself, not just in the
-// gateway's own routing.
-func addIndividualMediaItems(cfg *gwConfig, names []string) map[string]mediaItemRefs {
-	sort.Strings(names)
-	refs := make(map[string]mediaItemRefs, len(names))
-	for _, n := range names {
-		m := cfg.Models[n]
-		item := systray.AddMenuItem(fmt.Sprintf("%s (%s)", m.Label, n), "")
-		start := item.AddSubMenuItem("Start", fmt.Sprintf("Load %s on its own port %d", n, m.Port))
-		stop := item.AddSubMenuItem("Stop", fmt.Sprintf("Stop the backend on port %d", m.Port))
-
-		go func(shortName string, s *systray.MenuItem) {
-			for range s.ClickedCh {
-				loadModelAsync(shortName)
-			}
-		}(n, start)
-		go func(port int, s *systray.MenuItem) {
-			for range s.ClickedCh {
-				killPort(port)
-			}
-		}(m.Port, stop)
-
-		refs[n] = mediaItemRefs{item: item, start: start, stop: stop, port: m.Port}
-	}
-	return refs
-}
-
 func onReady() {
 	icon := buildIcon()
 	systray.SetTemplateIcon(icon, icon)
@@ -134,28 +86,29 @@ func onReady() {
 	cfg, cfgErr := loadGWConfig()
 	modelItems := map[string]*systray.MenuItem{}
 	var mMLX, mDS4, mStartMLX, mStartDS4, mStopMLX, mStopDS4 *systray.MenuItem
-	var mlxDefault, ds4Default string
-	var mediaRefs map[string]mediaItemRefs
+	var mOCR, mStartOCR, mStopOCR *systray.MenuItem
+	var mFlux, mStartFlux, mStopFlux *systray.MenuItem
+	var mlxDefault, ds4Default, ocrDefault, fluxDefault string
 
 	if cfgErr != nil {
 		mMissing := systray.AddMenuItem("Backends unavailable (models.json not found)", "")
 		mMissing.Disable()
 	} else {
-		// Media-kind entries are split in two, not lumped into one section:
-		// OCR-like ones (mlx/ds4-backed, the gateway spawns/kills them
-		// itself, same as rapid-mlx/ds4 above) vs FLUX-family ones (backend
-		// "mflux", a completely different runtime -- see ModelConfig.Kind's
-		// doc comment in the root models.go). Every entry in EITHER group
-		// gets its own dedicated port and its own individual Start/Stop --
-		// see addIndividualMediaItems -- so starting/stopping one never
-		// touches any other media model or the active chat model.
-		var mlxNames, ds4Names, mediaOtherNames, mediaFluxNames []string
+		// Media-kind entries split into two POOLS, not lumped together --
+		// OCR-like ones (any backend except "mflux") share
+		// cfg.MediaBackendPort, FLUX-family ones (backend "mflux") share
+		// cfg.FluxBackendPort. Each pool behaves exactly like rapid-mlx/ds4
+		// above: one shared Start/Stop, exclusive switching within the
+		// pool (loading flux2-klein-4b kills flux1-dev if it was running,
+		// same as loading a different chat model kills the previous one)
+		// -- but the two pools and the chat pool never touch each other.
+		var mlxNames, ds4Names, ocrNames, fluxNames []string
 		for n, m := range cfg.Models {
 			if m.Kind == "media" {
 				if m.Backend == "mflux" {
-					mediaFluxNames = append(mediaFluxNames, n)
+					fluxNames = append(fluxNames, n)
 				} else {
-					mediaOtherNames = append(mediaOtherNames, n)
+					ocrNames = append(ocrNames, n)
 				}
 				continue
 			}
@@ -168,12 +121,20 @@ func onReady() {
 		}
 		sort.Strings(mlxNames)
 		sort.Strings(ds4Names)
+		sort.Strings(ocrNames)
+		sort.Strings(fluxNames)
 
 		if len(mlxNames) > 0 {
 			mlxDefault = mlxNames[0]
 		}
 		if len(ds4Names) > 0 {
 			ds4Default = ds4Names[0]
+		}
+		if len(ocrNames) > 0 {
+			ocrDefault = ocrNames[0]
+		}
+		if len(fluxNames) > 0 {
+			fluxDefault = fluxNames[0]
 		}
 
 		mMLX = systray.AddMenuItem("rapid-mlx", "")
@@ -186,15 +147,20 @@ func onReady() {
 		mStopDS4 = mDS4.AddSubMenuItem("Stop ds4", fmt.Sprintf("Stop the backend on port %d", cfg.BackendPort))
 		addModelItems(mDS4, cfg, ds4Names, modelItems)
 
-		mediaRefs = map[string]mediaItemRefs{}
-		if len(mediaOtherNames) > 0 || len(mediaFluxNames) > 0 {
+		if len(ocrNames) > 0 || len(fluxNames) > 0 {
 			systray.AddSeparator()
 		}
-		for n, r := range addIndividualMediaItems(cfg, mediaOtherNames) {
-			mediaRefs[n] = r
+		if len(ocrNames) > 0 {
+			mOCR = systray.AddMenuItem("OCR", "Non-chat models kept out of the chat pickers -- own pool, own port, independent of the chat backend and of FLUX")
+			mStartOCR = addStartItem(mOCR, "Start OCR", ocrDefault, cfg.MediaBackendPort)
+			mStopOCR = mOCR.AddSubMenuItem("Stop OCR", fmt.Sprintf("Stop the backend on port %d", cfg.MediaBackendPort))
+			addModelItems(mOCR, cfg, ocrNames, modelItems)
 		}
-		for n, r := range addIndividualMediaItems(cfg, mediaFluxNames) {
-			mediaRefs[n] = r
+		if len(fluxNames) > 0 {
+			mFlux = systray.AddMenuItem("FLUX (Image Generation)", "Image-generation models via mflux -- own pool, own port, independent of the chat backend and of OCR")
+			mStartFlux = addStartItem(mFlux, "Start FLUX", fluxDefault, cfg.FluxBackendPort)
+			mStopFlux = mFlux.AddSubMenuItem("Stop FLUX", fmt.Sprintf("Stop the backend on port %d", cfg.FluxBackendPort))
+			addModelItems(mFlux, cfg, fluxNames, modelItems)
 		}
 	}
 	systray.AddSeparator()
@@ -243,7 +209,14 @@ func onReady() {
 		cfg:           cfg,
 		modelItems:    modelItems,
 		mCompression:  mCompression,
-		mediaRefs:     mediaRefs,
+		mOCR:          mOCR,
+		mStartOCR:     mStartOCR,
+		mStopOCR:      mStopOCR,
+		ocrDefault:    ocrDefault,
+		mFlux:         mFlux,
+		mStartFlux:    mStartFlux,
+		mStopFlux:     mStopFlux,
+		fluxDefault:   fluxDefault,
 	})
 
 	ollamaPort := 11434
@@ -262,6 +235,10 @@ func onReady() {
 				stopBackend(cfg)
 			case <-clickedOrNil(mStopDS4):
 				stopBackend(cfg)
+			case <-clickedOrNil(mStopOCR):
+				killPort(cfg.MediaBackendPort)
+			case <-clickedOrNil(mStopFlux):
+				killPort(cfg.FluxBackendPort)
 			case <-mOllamaStart.ClickedCh:
 				go func() {
 					if confirmPortFree(ollamaPort, "Ollama") {

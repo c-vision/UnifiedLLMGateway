@@ -72,6 +72,7 @@ Define your models in `models.json`:
   "backend_port": 11435,
   "ollama_port": 11434,
   "media_backend_port": 11436,
+  "flux_backend_port": 11437,
   "venv_dir": "~/path/to/your/mlx/venv",
   "ds4_dir": "~/path/to/ds4-server",
   "mflux_venv_dir": "~/path/to/your/mflux/venv",
@@ -94,16 +95,14 @@ Define your models in `models.json`:
       "label": "My OCR Model",
       "backend": "mlx",
       "has_vision": true,
-      "kind": "media",
-      "port": 11436
+      "kind": "media"
     },
     "my-flux-model": {
       "path": "~/models/some-flux-checkpoint",
       "label": "My FLUX Model",
       "backend": "mflux",
       "model_type": "dev",
-      "kind": "media",
-      "port": 11437
+      "kind": "media"
     }
   }
 }
@@ -113,7 +112,8 @@ Define your models in `models.json`:
 |---|---|
 | `backend_port` | Port that locally-spawned chat backends (`mlx`, `ds4`) listen on |
 | `ollama_port` | Ollama's own port (default `11434`), independent of `backend_port` |
-| `media_backend_port` | Starting port for auto-assigning `"kind":"media"` entries that don't set `"port"` explicitly (`backend_port + 1` by default) |
+| `media_backend_port` | Shared port for every OCR-like (`"kind":"media"`, backend not `"mflux"`) entry — `backend_port + 1` by default |
+| `flux_backend_port` | Shared port for every FLUX-family (`"kind":"media"`, `"backend":"mflux"`) entry — `media_backend_port + 1` by default |
 | `venv_dir` | Python virtualenv containing your MLX-based server binary |
 | `ds4_dir` | Directory containing a `ds4-server` binary, for GGUF-based models |
 | `mflux_venv_dir` | Python virtualenv with [`mflux`](https://github.com/filipstrand/mflux) installed — only needed if you have `"backend":"mflux"` entries |
@@ -121,7 +121,6 @@ Define your models in `models.json`:
 | `models.<name>.backend` | `"mlx"`, `"ds4"`, `"ollama"`, or `"mflux"` (image-generation models only) |
 | `models.<name>.ollama_model` | For `"ollama"` entries: Ollama's own model tag, if it differs from the shortname key |
 | `models.<name>.kind` | `"media"` to keep a non-chat model (OCR, image generation) out of the chat catalog — see below. Omit for ordinary chat models |
-| `models.<name>.port` | Only meaningful with `"kind":"media"` — this model's own dedicated port. Auto-assigned from `media_backend_port` upward if omitted |
 
 ## Usage
 
@@ -187,7 +186,7 @@ curl http://localhost:8082/v1/media-models
 
 It's still fully loadable the normal way (`unified-gateway load ocr`, the menu bar's own "Media Models" section) — `kind` only affects which catalog view it shows up in, not whether the gateway can serve it. This is *not* where image-generation models (FLUX, etc.) belong — those need [`mflux`](https://github.com/filipstrand/mflux), a completely separate runtime the gateway doesn't spawn or route to at all, so they're never added to `models.json`; see `~/ai/models.txt` for how those are tracked instead.
 
-**Every media model gets its own dedicated port and runs concurrently with everything else, never instead of it.** Switching between two *chat* models is deliberately exclusive — they share `Config.BackendPort`, and loading one kills whatever was there, because rapid-mlx/ds4-server only serve one model per process. Media models don't follow that rule at all: each one gets its own `"port"` in `models.json` (auto-assigned upward from `Config.MediaBackendPort`, `backend_port + 1` by default, if left unset) and its own fully independent process lifecycle. Requesting OCR while a chat model is mid-conversation loads OCR alongside it rather than killing the chat backend to make room — and loading `flux2-klein-4b` doesn't touch OCR or `flux1-dev` either. This is the same non-exclusive relationship Ollama already has with the chat backend, just generalized to as many independent media models as `models.json` configures. Both adapters route a request to whichever port matches its `model` field once that specific model is confirmed active (auto-loading it via the same `ensureBackendLoading` chat models use, otherwise), and the memory-safety check only ever credits/kills whatever was previously on *that* model's own port — so several rapid-mlx/ds4/mflux processes genuinely resident at once is expected, not a bug.
+**Media models form two pools, each running concurrently with the chat backend and with each other, never instead of them.** Switching between two *chat* models is deliberately exclusive — they share `Config.BackendPort`, and loading one kills whatever was there, because rapid-mlx/ds4-server only serve one model per process. Media models keep that same exclusivity *within their own pool*, but the pools themselves are fully independent: OCR-like entries (any `"kind":"media"` model except `"backend":"mflux"`) share `Config.MediaBackendPort`, FLUX-family entries (`"backend":"mflux"`) share `Config.FluxBackendPort`. Loading `flux2-klein-4b` kills `flux1-dev` if it was running (same pool, same as switching chat models) — but never touches OCR or whatever chat model is active, and vice versa. This is the same non-exclusive relationship Ollama already has with the chat backend, just split into two pools instead of one daemon. Both adapters route a request to whichever pool's port matches its `model` field once that specific model is confirmed active there (auto-loading it via the same `ensureBackendLoading` chat models use, otherwise), and the memory-safety check only ever credits/kills whatever was previously on *that* pool's port — so a chat model, an OCR model, and a FLUX model genuinely resident at once is expected, not a bug.
 
 **A third backend, `"mflux"`, exists solely for media-kind image-generation models.** mflux (the [Python library](https://github.com/filipstrand/mflux) FLUX models run on) has no server mode — every `mflux-generate*` command loads the model, generates one image, and exits, which makes "start once, stay loaded, auto-load on request" impossible with the CLI alone. `launchMflux` instead spawns a small persistent HTTP server (`flux_server.py`, tracked outside this repo — see `~/ai/models.txt` for where it lives and how it's installed) that wraps mflux's Python API directly: it loads the model once at startup and answers `POST /v1/images/generate` for as long as it stays up. `Config.MfluxVenvDir`/`Config.FluxServerScript` in `models.json` point at that script's own venv and file path; `ModelConfig.ModelType` carries mflux's own config-name alias (e.g. `"dev"`, `"flux2-klein-4b"`) so the script picks correct architecture defaults while still loading actual weights from `ModelConfig.Path` instead of triggering a fresh HuggingFace download.
 
@@ -244,7 +243,7 @@ Reading it top to bottom:
 - **`🟡 no model`** (or `🟢 <model-name>` / `🔴 stopped`) — what the gateway is *actually routing to right now*, asked directly of the gateway itself (`GET /v1/models` on its own OpenAI adapter). Green means it's up and serving a model; yellow means the adapters are up but nothing is loaded; red means they're stopped. Below it, **Start/Stop Gateway Adapters** are mutually exclusive — whichever doesn't apply right now is grayed out.
 - **`rapid-mlx`** / **`ds4`** — one entry per local backend, each a submenu with its own **Start**, **Stop**, and a list of the models configured for that backend (`models.json`'s `"backend": "mlx"` / `"ds4"` entries); clicking a model loads it directly. The 🟢/🔴 dot and model name are read straight from the real process's own command line (which one owns the backend port, and its `--served-model-name`/`--model` argument) — not from a state file this tool wrote earlier, so it's still correct even if that process was started or replaced by something else.
 - **`Ollama`** — same shape, but for the independently-running Ollama daemon: **Start Ollama**/**Stop Ollama** plus the list of `"backend": "ollama"` models to warm up. Whether it's running comes from checking the process itself, and which model it has loaded comes from Ollama's own `/api/ps` — so stopping Ollama by hand, outside this tool, is reflected immediately too.
-- **Media models** — one top-level entry *per model*, not one shared section: unlike `rapid-mlx`/`ds4`/`Ollama` above (where every model in the list shares one port, so the section itself gets one Start/Stop), each `"kind":"media"` model has its own dedicated port and therefore its own individual **Start**/**Stop** pair and its own 🟢/🔴 status. Starting or stopping one never touches any other model, chat or media. OCR (backend `mlx`) and every FLUX model (backend `mflux`) show up this way, entirely independent of each other.
+- **`OCR`** / **`FLUX (Image Generation)`** — one section per media pool, appearing only if `models.json` has entries for it. Same shape as `rapid-mlx`/`ds4` above: one shared **Start**/**Stop** and a model list, switching within the pool is exclusive (loading a different FLUX model kills the previous one). Neither pool ever touches the chat backend or the other pool.
 - **Start All** / **Stop All** — bulk versions of the above.
 - **Reload Settings** — the model list is only read from `models.json` once, at startup, and there's no clean way to rebuild an existing systray submenu tree in place — so this relaunches a fresh copy of the app (which reads `models.json` fresh) and quits the current one. Use it after editing `models.json` by hand, or after `unified-gateway` itself changes it.
 - **Quit Menu Bar** — closes only this tray app. It never touches the gateway, the model backend, or Ollama; see [below](#why-two-separate-launchagents) for why.
@@ -278,7 +277,8 @@ This is deliberate, not an oversight: `local.unified-gateway` (the actual API se
 | OpenAI Adapter | `8082` | OpenCode and other OpenAI-compatible clients |
 | Local backend (`mlx`/`ds4`) | `11435` (configurable) | The actively loaded chat model process |
 | Ollama | `11434` (its own default) | Independent, always-on daemon |
-| Each media model (OCR, FLUX, ...) | `11436`+ (auto-assigned or explicit per entry) | One dedicated port per `"kind":"media"` entry — never shared with the chat backend or each other |
+| OCR-like media pool | `11436` (configurable) | Whichever `"kind":"media"` model (except `"backend":"mflux"`) is currently loaded — exclusive within this pool, independent of the chat backend |
+| FLUX media pool | `11437` (configurable) | Whichever `"backend":"mflux"` model is currently loaded — exclusive within this pool, independent of the chat backend and the OCR-like pool |
 
 ## Known limitations
 

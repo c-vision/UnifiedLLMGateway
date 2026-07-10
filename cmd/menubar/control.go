@@ -24,13 +24,20 @@ type modelConfig struct {
 	Backend     string `json:"backend"`
 	OllamaModel string `json:"ollama_model,omitempty"`
 	Kind        string `json:"kind,omitempty"`
-	Port        int    `json:"port,omitempty"`
 }
 
+// MediaBackendPort/FluxBackendPort are the two media POOLS -- OCR-like
+// entries (any "kind":"media" model except backend "mflux") share
+// MediaBackendPort, FLUX-family entries (backend "mflux") share
+// FluxBackendPort. Both are exclusive within themselves exactly like
+// BackendPort is for chat models, but fully independent of the chat pool
+// and of each other -- mirrors ModelConfig.Kind's doc comment in the root
+// models.go.
 type gwConfig struct {
 	BackendPort      int                    `json:"backend_port"`
 	OllamaPort       int                    `json:"ollama_port"`
 	MediaBackendPort int                    `json:"media_backend_port,omitempty"`
+	FluxBackendPort  int                    `json:"flux_backend_port,omitempty"`
 	Models           map[string]modelConfig `json:"models"`
 }
 
@@ -83,6 +90,9 @@ func loadGWConfig() (*gwConfig, error) {
 	}
 	if cfg.MediaBackendPort == 0 {
 		cfg.MediaBackendPort = cfg.BackendPort + 1
+	}
+	if cfg.FluxBackendPort == 0 {
+		cfg.FluxBackendPort = cfg.MediaBackendPort + 1
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
@@ -190,6 +200,27 @@ func runningDS4Model(cfg *gwConfig, port int) (label string, active bool) {
 		}
 	}
 	return path, true
+}
+
+// runningFluxModel reports whether the persistent flux_server.py process is
+// on port, and if so, which model it's serving -- same idea as
+// runningDS4Model, since mflux's server has no --served-model-name
+// equivalent either: its --model-path is matched back against configured
+// "mflux" entries.
+func runningFluxModel(cfg *gwConfig, port int) (shortName string, active bool) {
+	cmd := portOwnerCommand(port)
+	if !strings.Contains(cmd, "flux_server") {
+		return "", false
+	}
+	path := commandFlagValue(cmd, "--model-path")
+	if cfg != nil {
+		for name, m := range cfg.Models {
+			if m.Backend == "mflux" && m.Path == path {
+				return name, true
+			}
+		}
+	}
+	return "", true
 }
 
 // runningOllamaModel asks Ollama's own API which model it currently has
@@ -374,14 +405,19 @@ func stopBackend(cfg *gwConfig) {
 // Stop clicks (see addIndividualMediaItems in main.go) kill just the one
 // port for that specific model instead; this never touches the chat
 // backend's port, since media models always have their own.
+// stopAllMediaBackends kills both media pools -- MediaBackendPort (OCR-
+// like) and FluxBackendPort (FLUX-family) -- used only by "Stop All".
+// Individual Stop clicks on the OCR/FLUX sections kill just that one
+// pool's port instead; neither ever touches the chat backend's port.
 func stopAllMediaBackends(cfg *gwConfig) {
 	if cfg == nil {
 		return
 	}
-	for _, m := range cfg.Models {
-		if m.Kind == "media" && m.Port != 0 {
-			killPort(m.Port)
-		}
+	if cfg.MediaBackendPort != 0 {
+		killPort(cfg.MediaBackendPort)
+	}
+	if cfg.FluxBackendPort != 0 {
+		killPort(cfg.FluxBackendPort)
 	}
 }
 

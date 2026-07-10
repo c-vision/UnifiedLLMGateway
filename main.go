@@ -137,12 +137,12 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 
 	backend := g.resolveBackend()
 
-	// Media-kind models route to their own independent, dedicated port --
-	// see the matching block in handleOpenAIProxy for why (loading/
-	// switching one must never touch the chat backend resolved above).
+	// Media-kind models route to their own pool's shared port -- see the
+	// matching block in handleOpenAIProxy for why (loading/switching one
+	// must never touch the chat backend resolved above).
 	if cfg, err := loadConfig(); err == nil && req.Model != "" {
 		if mc, ok := cfg.Models[req.Model]; ok && mc.Kind == "media" {
-			if !resolveMediaModelActive(cfg, req.Model) {
+			if !isMediaModelActive(cfg, req.Model) {
 				if ensureBackendLoading(req.Model) {
 					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q is not active yet -- load triggered, retry shortly", req.Model)})
 				} else {
@@ -150,7 +150,7 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 				}
 				return
 			}
-			backend = activeBackend{Port: mc.Port, Model: req.Model}
+			backend = activeBackend{Port: mediaPoolPort(cfg, mc), Model: req.Model}
 		}
 	}
 
@@ -638,14 +638,14 @@ func (g *Gateway) handleListMediaModels(c *gin.Context) {
 			"label":      m.Label,
 			"backend":    m.Backend,
 			"has_vision": m.HasVision,
-			// Each media model has its own dedicated, fixed port (see
-			// ModelConfig.Port's doc comment) -- exposed here so a client
-			// like unicorn-server's image-generation page can call the
-			// model directly (image generation doesn't fit the OpenAI
-			// chat-completions shape the regular adapters speak) once it's
-			// confirmed active.
-			"port":   m.Port,
-			"active": resolveMediaModelActive(cfg, name),
+			// The pool's shared port (OCR-like models share
+			// MediaBackendPort, FLUX-family models share FluxBackendPort --
+			// see mediaPoolPort), exposed so a client like unicorn-server's
+			// image-generation page can call the model directly once it's
+			// confirmed active (image generation doesn't fit the OpenAI
+			// chat-completions shape the regular adapters speak).
+			"port":   mediaPoolPort(cfg, m),
+			"active": isMediaModelActive(cfg, name),
 		})
 	}
 	c.JSON(200, gin.H{"object": "list", "data": data})
@@ -763,14 +763,14 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 	}
 
 	// Media-kind models (OCR, each FLUX model, etc.) route to their own
-	// independent, dedicated port and never touch the chat backend
-	// resolved above -- see resolveMediaModelActive and loadModelLocked's
-	// Kind branch in models.go. A request naming one of these completely
+	// pool's shared port and never touch the chat backend resolved above
+	// -- see isMediaModelActive/mediaPoolPort and loadModelLocked's Kind
+	// branch in models.go. A request naming one of these completely
 	// bypasses the chat-mismatch self-heal below; it gets its own copy of
-	// the same self-heal, just against that model's own port instead.
+	// the same self-heal, just against that model's pool instead.
 	if cfg, err := loadConfig(); err == nil && originalModel != "" {
 		if mc, ok := cfg.Models[originalModel]; ok && mc.Kind == "media" {
-			if !resolveMediaModelActive(cfg, originalModel) {
+			if !isMediaModelActive(cfg, originalModel) {
 				if ensureBackendLoading(originalModel) {
 					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q is not active yet -- load triggered, retry shortly", originalModel)})
 				} else {
@@ -778,7 +778,7 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 				}
 				return
 			}
-			backend = activeBackend{Port: mc.Port, Model: originalModel}
+			backend = activeBackend{Port: mediaPoolPort(cfg, mc), Model: originalModel}
 		}
 	}
 
