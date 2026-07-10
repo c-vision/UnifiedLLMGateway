@@ -92,15 +92,15 @@
       "model_type": "gpt_oss"
     },
     "ocr": {
-      "path": "~/ai/Models/media/ocr/unlimited-ocr-mxfp8-mlx",
-      "label": "Unlimited-OCR (DeepSeek-OCR, mxfp8)",
+      "path": "~/ai/Models/media/ocr/unlimited-ocr-8bit-mlx",
+      "label": "Unlimited-OCR (DeepSeek-OCR, 8bit)",
       "backend": "mlx",
       "model_type": "deepseekocr",
       "has_vision": true,
       "kind": "media"
     },
     "flux1-dev": {
-      "path": "~/ai/Models/media/image-gen/FLUX.1-dev-4bit",
+      "path": "~/ai/Models/media/image-gen/FLUX.1-dev-mflux-4bit",
       "label": "FLUX.1-dev (4-bit, image generation)",
       "backend": "mflux",
       "model_type": "dev",

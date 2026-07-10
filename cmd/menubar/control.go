@@ -202,14 +202,14 @@ func runningDS4Model(cfg *gwConfig, port int) (label string, active bool) {
 	return path, true
 }
 
-// runningFluxModel reports whether the persistent flux_server.py process is
-// on port, and if so, which model it's serving -- same idea as
+// runningFluxModel reports whether the persistent flux-server/server.py
+// process is on port, and if so, which model it's serving -- same idea as
 // runningDS4Model, since mflux's server has no --served-model-name
 // equivalent either: its --model-path is matched back against configured
 // "mflux" entries.
 func runningFluxModel(cfg *gwConfig, port int) (shortName string, active bool) {
 	cmd := portOwnerCommand(port)
-	if !strings.Contains(cmd, "flux_server") {
+	if !strings.Contains(cmd, "flux-server") {
 		return "", false
 	}
 	path := commandFlagValue(cmd, "--model-path")

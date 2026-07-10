@@ -187,7 +187,7 @@ func commandFlagValue(cmd, flag string) string {
 //   - rapid-mlx: reads its own --served-model-name argument directly
 //   - ds4-server: has no equivalent flag, so its --model path is matched
 //     back against configured "ds4" entries
-//   - flux_server.py (mflux): same idea as ds4 -- no --served-model-name
+//   - flux-server/server.py (mflux): same idea as ds4 -- no --served-model-name
 //     equivalent, so its --model-path is matched back against configured
 //     "mflux" entries
 //
@@ -208,7 +208,7 @@ func runningBackendModel(cfg *Config, port int) string {
 			}
 		}
 	}
-	if strings.Contains(cmd, "flux_server") {
+	if strings.Contains(cmd, "flux-server") {
 		path := commandFlagValue(cmd, "--model-path")
 		for name, m := range cfg.Models {
 			if m.Backend == "mflux" && m.Path == path {
