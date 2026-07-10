@@ -53,11 +53,12 @@ type ModelConfig struct {
 }
 
 type Config struct {
-	BackendPort int                    `json:"backend_port"`
-	OllamaPort  int                    `json:"ollama_port,omitempty"`
-	VenvDir     string                 `json:"venv_dir"`
-	DS4Dir      string                 `json:"ds4_dir"`
-	Models      map[string]ModelConfig `json:"models"`
+	BackendPort      int                    `json:"backend_port"`
+	OllamaPort       int                    `json:"ollama_port,omitempty"`
+	MediaBackendPort int                    `json:"media_backend_port,omitempty"`
+	VenvDir          string                 `json:"venv_dir"`
+	DS4Dir           string                 `json:"ds4_dir"`
+	Models           map[string]ModelConfig `json:"models"`
 }
 
 func expandHome(path string) string {
@@ -89,6 +90,16 @@ func loadConfig() (*Config, error) {
 	cfg.DS4Dir = expandHome(cfg.DS4Dir)
 	if cfg.OllamaPort == 0 {
 		cfg.OllamaPort = 11434
+	}
+	// Media-kind models (OCR, etc.) get their own port, never cfg.BackendPort
+	// -- see loadModelLocked and resolveActiveMediaBackend. This is what
+	// lets loading/switching OCR run alongside whatever chat model is
+	// already active on the main backend port, instead of killing it the
+	// way switching between two chat models correctly does. Mirrors how
+	// Ollama already runs independently of the mlx/ds4 backend lifecycle,
+	// just for a locally-spawned process instead of an external daemon.
+	if cfg.MediaBackendPort == 0 {
+		cfg.MediaBackendPort = cfg.BackendPort + 1
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
@@ -229,6 +240,21 @@ func resolveActiveBackend(cfg *Config, fallbackPort int) activeBackend {
 	return activeBackend{Port: fallbackPort}
 }
 
+// resolveActiveMediaBackend is resolveActiveBackend's counterpart for
+// media-kind models (OCR, etc.): checks cfg.MediaBackendPort instead of
+// cfg.BackendPort, entirely independent of whatever chat model is active.
+// No Ollama case here -- media models are always locally-spawned mlx/ds4
+// processes, never an Ollama tag.
+func resolveActiveMediaBackend(cfg *Config) activeBackend {
+	if cfg == nil {
+		return activeBackend{}
+	}
+	if name := runningBackendModel(cfg, cfg.MediaBackendPort); name != "" {
+		return activeBackend{Port: cfg.MediaBackendPort, Model: name}
+	}
+	return activeBackend{Port: cfg.MediaBackendPort}
+}
+
 // warmOllamaModel triggers Ollama to load the model into memory now, via its
 // native /api/generate endpoint with an empty prompt, instead of waiting for
 // the first real chat request to pay that cost.
@@ -288,12 +314,12 @@ func waitForPort(port int, timeout time.Duration) bool {
 	return false
 }
 
-func launchMLX(cfg *Config, shortName string, m ModelConfig) (*exec.Cmd, error) {
+func launchMLX(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cmd, error) {
 	rapidBin := filepath.Join(cfg.VenvDir, "bin", "rapid-mlx")
 	args := []string{
 		"serve", m.Path,
 		"--host", "127.0.0.1",
-		"--port", fmt.Sprintf("%d", cfg.BackendPort),
+		"--port", fmt.Sprintf("%d", port),
 		"--served-model-name", shortName,
 	}
 	if (m.ModelType == "qwen3" || m.ModelType == "qwen3_5" || m.ModelType == "qwen2_moe") && m.HasVision {
@@ -354,7 +380,7 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig) (*exec.Cmd, error) 
 	return cmd, nil
 }
 
-func launchDS4(cfg *Config, m ModelConfig) (*exec.Cmd, error) {
+func launchDS4(cfg *Config, m ModelConfig, port int) (*exec.Cmd, error) {
 	ds4Server := filepath.Join(cfg.DS4Dir, "ds4-server")
 	ctx := m.Ctx
 	if ctx == 0 {
@@ -364,7 +390,7 @@ func launchDS4(cfg *Config, m ModelConfig) (*exec.Cmd, error) {
 		"--model", m.Path,
 		"--metal", "--ctx", fmt.Sprintf("%d", ctx),
 		"--power", "100",
-		"--host", "127.0.0.1", "--port", fmt.Sprintf("%d", cfg.BackendPort),
+		"--host", "127.0.0.1", "--port", fmt.Sprintf("%d", port),
 	}
 	cmd := exec.Command(ds4Server, args...)
 	cmd.Dir = cfg.DS4Dir
@@ -609,6 +635,21 @@ func loadModelLocked(shortName string) error {
 			fmt.Printf("[unified-gateway] %s warmed up on :%d\n", m.Label, cfg.OllamaPort)
 		}
 	} else {
+		// Media-kind models (OCR, etc.) get their own port and their own
+		// process lifecycle, completely independent of whatever chat model
+		// is active on cfg.BackendPort -- loading/switching one never kills
+		// or even looks at the other. This is the same non-exclusive
+		// behavior Ollama already gets (a request for OCR shouldn't have
+		// any more effect on the chat model than a request for an Ollama
+		// tag does today). Two mlx/ds4 processes can genuinely run at once
+		// as a result; the memory check below only ever credits/kills
+		// whatever was previously on THIS model's own port, never the
+		// other one's.
+		port := cfg.BackendPort
+		if m.Kind == "media" {
+			port = cfg.MediaBackendPort
+		}
+
 		if required := estimateModelSizeGB(m); required > 0 {
 			if m.Backend == "mlx" {
 				// rapid-mlx's own prefix-cache reservation, capped via
@@ -617,30 +658,30 @@ func loadModelLocked(shortName string) error {
 				// size estimate.
 				required += float64(mlxCacheReserveMBFor(required)) / 1024.0
 			}
-			freeing := runningRSSGB(cfg.BackendPort)
+			freeing := runningRSSGB(port)
 			if ok, msg := checkMemory(required, freeing); !ok {
 				return fmt.Errorf("%s", msg)
 			}
 		}
 
-		fmt.Printf("[unified-gateway] loading %s (%s)...\n", shortName, m.Label)
-		killPort(cfg.BackendPort)
+		fmt.Printf("[unified-gateway] loading %s (%s) on :%d...\n", shortName, m.Label, port)
+		killPort(port)
 
 		var cmd *exec.Cmd
 		if m.Backend == "ds4" {
-			cmd, err = launchDS4(cfg, m)
+			cmd, err = launchDS4(cfg, m, port)
 		} else {
-			cmd, err = launchMLX(cfg, shortName, m)
+			cmd, err = launchMLX(cfg, shortName, m, port)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to launch backend: %w", err)
 		}
 
-		fmt.Printf("[unified-gateway] waiting for backend on :%d...\n", cfg.BackendPort)
-		if !waitForPort(cfg.BackendPort, 180*time.Second) {
-			return fmt.Errorf("backend did not become ready on :%d", cfg.BackendPort)
+		fmt.Printf("[unified-gateway] waiting for backend on :%d...\n", port)
+		if !waitForPort(port, 180*time.Second) {
+			return fmt.Errorf("backend did not become ready on :%d", port)
 		}
-		fmt.Printf("[unified-gateway] %s ready on :%d\n", m.Label, cfg.BackendPort)
+		fmt.Printf("[unified-gateway] %s ready on :%d\n", m.Label, port)
 		crashTracker.recordLoad(shortName)
 		go func() {
 			cmd.Wait()

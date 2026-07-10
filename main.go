@@ -137,6 +137,24 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 
 	backend := g.resolveBackend()
 
+	// Media-kind models route to their own independent port -- see the
+	// matching block in handleOpenAIProxy for why (loading/switching one
+	// must never touch the chat backend resolved above).
+	if cfg, err := loadConfig(); err == nil && req.Model != "" {
+		if mc, ok := cfg.Models[req.Model]; ok && mc.Kind == "media" {
+			mediaBackend := resolveActiveMediaBackend(cfg)
+			if mediaBackend.Model != req.Model {
+				if ensureBackendLoading(req.Model) {
+					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q is not active yet -- load triggered, retry shortly", req.Model)})
+				} else {
+					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q crashed repeatedly right after loading -- not retrying automatically, check gateway logs and restart manually", req.Model)})
+				}
+				return
+			}
+			backend = mediaBackend
+		}
+	}
+
 	// The active backend serves whatever it was loaded with, regardless of
 	// what model name a request asks for -- rapid-mlx itself rejects a
 	// mismatched name with its own 404 rather than silently switching. Left
@@ -148,7 +166,9 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 	// Treat "reachable but serving something else" the same way
 	// "unreachable" is already treated below: trigger a load and tell the
 	// client to retry, instead of forwarding to a backend that can't serve
-	// this request.
+	// this request. (backend is already the resolved media backend above
+	// when req.Model is media-kind, so this comparison always passes for
+	// those and only ever fires for a genuine chat-model mismatch.)
 	if backend.Port != 0 && req.Model != "" && req.Model != backend.Model && req.Model != backend.UpstreamModel {
 		if ensureBackendLoading(req.Model) {
 			c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active (currently serving %q) -- switch triggered, retry shortly", req.Model, backend.Model)})
@@ -606,7 +626,7 @@ func (g *Gateway) handleListMediaModels(c *gin.Context) {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("cannot read models.json: %v", err)})
 		return
 	}
-	active := g.resolveBackend()
+	active := resolveActiveMediaBackend(cfg)
 
 	data := make([]gin.H, 0)
 	for name, m := range cfg.Models {
@@ -738,6 +758,27 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 		}
 	}
 
+	// Media-kind models (OCR, etc.) route to their own independent port
+	// and never touch the chat backend resolved above -- see
+	// resolveActiveMediaBackend and loadModelLocked's Kind branch in
+	// models.go. A request naming one of these completely bypasses the
+	// chat-mismatch self-heal below; it gets its own copy of the same
+	// self-heal, just against cfg.MediaBackendPort instead.
+	if cfg, err := loadConfig(); err == nil && originalModel != "" {
+		if mc, ok := cfg.Models[originalModel]; ok && mc.Kind == "media" {
+			mediaBackend := resolveActiveMediaBackend(cfg)
+			if mediaBackend.Model != originalModel {
+				if ensureBackendLoading(originalModel) {
+					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q is not active yet -- load triggered, retry shortly", originalModel)})
+				} else {
+					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q crashed repeatedly right after loading -- not retrying automatically, check gateway logs and restart manually", originalModel)})
+				}
+				return
+			}
+			backend = mediaBackend
+		}
+	}
+
 	// Same self-heal as the Anthropic adapter: the active backend answers
 	// with whatever it was loaded with regardless of what model a request
 	// names, so a stale/different model already running would otherwise
@@ -745,6 +786,9 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 	// backend's real status code below, so a mismatch here at least
 	// wasn't silent like the Anthropic side was -- but it still never
 	// self-healed, just kept returning the backend's 404 forever.
+	// (backend is already the resolved media backend above when
+	// originalModel is media-kind, so this comparison always passes for
+	// those and only ever fires for a genuine chat-model mismatch.)
 	if backend.Port != 0 && originalModel != "" && originalModel != backend.Model && originalModel != backend.UpstreamModel {
 		if ensureBackendLoading(originalModel) {
 			c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active (currently serving %q) -- switch triggered, retry shortly", originalModel, backend.Model)})
