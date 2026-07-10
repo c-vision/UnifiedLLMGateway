@@ -27,6 +27,7 @@ type refreshRefs struct {
 	mOllamaStop   *systray.MenuItem
 	cfg           *gwConfig
 	modelItems    map[string]*systray.MenuItem
+	mCompression  *systray.MenuItem
 }
 
 // setEnabled is a small helper since MenuItem only exposes Enable/Disable,
@@ -67,6 +68,23 @@ func refreshLoop(r refreshRefs) {
 		setEnabled(r.mStopGateway, gwUp)
 		setEnabled(r.mOllamaStart, !ollUp)
 		setEnabled(r.mOllamaStop, ollUp)
+
+		if r.mCompression != nil {
+			setEnabled(r.mCompression, gwUp)
+			if gwUp {
+				if state, ok := getCompressionState(); ok {
+					if state.Enabled {
+						r.mCompression.Check()
+					} else {
+						r.mCompression.Uncheck()
+					}
+					r.mCompression.SetTooltip(fmt.Sprintf(
+						"Trim stale/duplicate old-message content before it reaches the model — takes effect instantly, no restart\n%d requests compressed, %d chars saved this session",
+						state.RequestsCompressed, state.CharsSaved,
+					))
+				}
+			}
+		}
 
 		statusLine := "🔴 stopped"
 		if gwUp {

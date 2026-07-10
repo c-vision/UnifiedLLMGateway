@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -247,6 +248,54 @@ func gatewayCurrentModel() string {
 		}
 	}
 	return ""
+}
+
+// compressionState mirrors the gateway's GET /v1/compression response.
+type compressionState struct {
+	Enabled            bool  `json:"enabled"`
+	RequestsCompressed int64 `json:"requests_compressed"`
+	CharsSaved         int64 `json:"chars_saved"`
+}
+
+// getCompressionState asks the gateway for prompt-compression's current
+// live state (toggle + cumulative savings). ok is false when the gateway
+// itself isn't reachable, so the caller can distinguish "off" from
+// "unknown" rather than defaulting the checkbox to unchecked either way.
+func getCompressionState() (state compressionState, ok bool) {
+	resp, err := http.Get("http://127.0.0.1:8082/v1/compression")
+	if err != nil {
+		return compressionState{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return compressionState{}, false
+	}
+	if json.NewDecoder(resp.Body).Decode(&state) != nil {
+		return compressionState{}, false
+	}
+	return state, true
+}
+
+// setCompressionEnabled flips the gateway's live prompt-compression flag
+// (POST /v1/compression) -- takes effect on the very next request, no
+// model reload or gateway restart needed, unlike almost every other knob
+// in this menu.
+func setCompressionEnabled(enabled bool) error {
+	body, _ := json.Marshal(map[string]bool{"enabled": enabled})
+	req, err := http.NewRequest("POST", "http://127.0.0.1:8082/v1/compression", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func ollamaRunning() bool {

@@ -1,16 +1,15 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
 
 func withCompressionEnabled(t *testing.T) {
 	t.Helper()
-	old := os.Getenv("PROMPT_COMPRESSION")
-	os.Setenv("PROMPT_COMPRESSION", "1")
-	t.Cleanup(func() { os.Setenv("PROMPT_COMPRESSION", old) })
+	old := promptCompressionEnabled()
+	setPromptCompressionEnabled(true)
+	t.Cleanup(func() { setPromptCompressionEnabled(old) })
 }
 
 func msg(role, content string) map[string]interface{} {
@@ -27,7 +26,9 @@ func toInterfaceSlice(msgs []map[string]interface{}) []interface{} {
 }
 
 func TestCompressMessages_DisabledByDefault(t *testing.T) {
-	os.Unsetenv("PROMPT_COMPRESSION")
+	old := promptCompressionEnabled()
+	setPromptCompressionEnabled(false)
+	t.Cleanup(func() { setPromptCompressionEnabled(old) })
 	long := strings.Repeat("x", compressTruncateThreshold+500)
 	messages := toInterfaceSlice([]map[string]interface{}{
 		msg("system", "you are a helpful assistant"),

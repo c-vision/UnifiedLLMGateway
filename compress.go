@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"sync/atomic"
 )
 
 // Prompt compression: opt-in (PROMPT_COMPRESSION=1) reduction of stale or
@@ -43,9 +44,35 @@ const (
 	compressTailKeepChars     = 800
 )
 
-func promptCompressionEnabled() bool {
-	return os.Getenv("PROMPT_COMPRESSION") == "1"
+// compressionEnabled holds live on/off state, toggleable at runtime via
+// GET/POST /v1/compression (see handleOpenAIProxy) -- no restart needed,
+// unlike almost every other knob in this gateway, which all require a
+// process restart to change. Seeded from PROMPT_COMPRESSION=1 at startup
+// so a fixed deployment can still default it on, but the menu bar toggle
+// (cmd/menubar) is the intended day-to-day control.
+var compressionEnabled atomic.Bool
+
+func init() {
+	compressionEnabled.Store(os.Getenv("PROMPT_COMPRESSION") == "1")
 }
+
+func promptCompressionEnabled() bool {
+	return compressionEnabled.Load()
+}
+
+func setPromptCompressionEnabled(v bool) {
+	compressionEnabled.Store(v)
+}
+
+// compressionStats is cumulative, process-lifetime savings -- surfaced at
+// GET /v1/compression so the menu bar (or curl) can show it's actually
+// doing something, not just report an on/off flag.
+type compressionStatsT struct {
+	requestsCompressed atomic.Int64
+	charsSaved         atomic.Int64
+}
+
+var compressionStats compressionStatsT
 
 // contentSignature hashes long content instead of using the raw string as a
 // map key, so a handful of huge duplicated tool outputs don't themselves

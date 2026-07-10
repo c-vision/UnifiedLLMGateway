@@ -141,6 +141,9 @@ func onReady() {
 	mStopAll := systray.AddMenuItem("Stop All", "Stop gateway adapters, backend, and Ollama")
 	systray.AddSeparator()
 
+	mCompression := systray.AddMenuItem("Prompt Compression", "Trim stale/duplicate old-message content before it reaches the model — takes effect instantly, no restart")
+	systray.AddSeparator()
+
 	mReload := systray.AddMenuItem("Reload Settings", "Restart this menu bar to pick up changes to models.json")
 	systray.AddSeparator()
 
@@ -163,6 +166,7 @@ func onReady() {
 		mOllamaStop:   mOllamaStop,
 		cfg:           cfg,
 		modelItems:    modelItems,
+		mCompression:  mCompression,
 	})
 
 	ollamaPort := 11434
@@ -196,6 +200,21 @@ func onReady() {
 				stopGateway()
 				stopBackend(cfg)
 				stopOllama()
+			case <-mCompression.ClickedCh:
+				state, ok := getCompressionState()
+				if !ok {
+					notify("Unified Gateway", "Gateway unreachable — start it first")
+					continue
+				}
+				if err := setCompressionEnabled(!state.Enabled); err != nil {
+					notify("Unified Gateway", fmt.Sprintf("Failed to toggle prompt compression: %v", err))
+					continue
+				}
+				if state.Enabled {
+					notify("Unified Gateway", "Prompt compression disabled")
+				} else {
+					notify("Unified Gateway", "Prompt compression enabled")
+				}
 			case <-mReload.ClickedCh:
 				if err := relaunchSelf(); err != nil {
 					continue // couldn't spawn the replacement — stay running rather than quit into nothing

@@ -611,6 +611,24 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 		g.handleLoadModel(c, shortName)
 		return
 	}
+	if path == "/v1/compression" {
+		if c.Request.Method == "POST" {
+			var body struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil {
+				c.JSON(400, gin.H{"error": "expected JSON body {\"enabled\": bool}"})
+				return
+			}
+			setPromptCompressionEnabled(body.Enabled)
+		}
+		c.JSON(200, gin.H{
+			"enabled":             promptCompressionEnabled(),
+			"requests_compressed": compressionStats.requestsCompressed.Load(),
+			"chars_saved":         compressionStats.charsSaved.Load(),
+		})
+		return
+	}
 
 	var bodyBytes []byte
 	if c.Request.Body != nil {
@@ -641,6 +659,8 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 				if compressed, saved := compressMessages(msgs); saved > 0 {
 					payload["messages"] = compressed
 					modified = true
+					compressionStats.requestsCompressed.Add(1)
+					compressionStats.charsSaved.Add(int64(saved))
 					log.Printf("🗜️  prompt compression saved ~%d chars", saved)
 				}
 			}
