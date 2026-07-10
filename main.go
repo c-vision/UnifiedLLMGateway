@@ -632,8 +632,19 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 			if m, ok := payload["model"].(string); ok {
 				originalModel = m
 			}
+			modified := false
 			if backend.UpstreamModel != "" && originalModel != "" {
 				payload["model"] = backend.UpstreamModel
+				modified = true
+			}
+			if msgs, ok := payload["messages"].([]interface{}); ok {
+				if compressed, saved := compressMessages(msgs); saved > 0 {
+					payload["messages"] = compressed
+					modified = true
+					log.Printf("🗜️  prompt compression saved ~%d chars", saved)
+				}
+			}
+			if modified {
 				if rewritten, err := json.Marshal(payload); err == nil {
 					bodyBytes = rewritten
 				}
