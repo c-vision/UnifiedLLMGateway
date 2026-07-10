@@ -157,7 +157,7 @@ func refreshLoop(r refreshRefs) {
 			case mediaActive:
 				r.mMedia.SetTitle(fmt.Sprintf("🟢 Media (port %d)", r.cfg.MediaBackendPort))
 			default:
-				r.mMedia.SetTitle("🔴 Media Models (OCR, etc.)")
+				r.mMedia.SetTitle("🔴 Media Models")
 			}
 			if r.mediaDefault != "" {
 				setEnabled(r.mStartMedia, !mediaActive)

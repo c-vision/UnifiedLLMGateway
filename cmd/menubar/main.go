@@ -133,7 +133,14 @@ func onReady() {
 
 		if len(mediaNames) > 0 {
 			mediaDefault = mediaNames[0]
-			mMedia = systray.AddMenuItem("Media Models (OCR, etc.)", "Special-purpose models kept out of the chat pickers -- runs on its own port, alongside whatever chat model is active, not instead of it")
+			// Label deliberately doesn't name specific models (the submenu
+			// itself already lists whichever "kind":"media" entries are
+			// configured) -- avoids implying this section can start/stop
+			// anything beyond what the gateway itself can spawn (mlx/ds4).
+			// Image-generation tools like mflux are NOT here and can't be:
+			// they're a separate runtime this gateway never launches or
+			// routes to at all, see the models.json docs in the README.
+			mMedia = systray.AddMenuItem("Media Models", "Non-chat models the gateway can serve (mlx/ds4-backed, e.g. OCR) -- kept out of the chat pickers, running on its own port alongside whatever chat model is active. Does NOT include external tools like image generation (those need mflux, a separate runtime this gateway never spawns).")
 			mStartMedia = addStartItem(mMedia, "Start Media Models", mediaDefault, cfg.MediaBackendPort)
 			mStopMedia = mMedia.AddSubMenuItem("Stop Media Models", fmt.Sprintf("Stop the media backend on port %d", cfg.MediaBackendPort))
 			addModelItems(mMedia, cfg, mediaNames, modelItems)
