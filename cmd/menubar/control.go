@@ -27,9 +27,10 @@ type modelConfig struct {
 }
 
 type gwConfig struct {
-	BackendPort int                    `json:"backend_port"`
-	OllamaPort  int                    `json:"ollama_port"`
-	Models      map[string]modelConfig `json:"models"`
+	BackendPort      int                    `json:"backend_port"`
+	OllamaPort       int                    `json:"ollama_port"`
+	MediaBackendPort int                    `json:"media_backend_port,omitempty"`
+	Models           map[string]modelConfig `json:"models"`
 }
 
 func expandHome(path string) string {
@@ -78,6 +79,9 @@ func loadGWConfig() (*gwConfig, error) {
 	}
 	if cfg.OllamaPort == 0 {
 		cfg.OllamaPort = 11434
+	}
+	if cfg.MediaBackendPort == 0 {
+		cfg.MediaBackendPort = cfg.BackendPort + 1
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
@@ -362,6 +366,16 @@ func stopBackend(cfg *gwConfig) {
 		return
 	}
 	killPort(cfg.BackendPort)
+}
+
+// stopMediaBackend kills whatever is on cfg.MediaBackendPort -- always a
+// separate port from cfg.BackendPort (see ModelConfig.Kind's doc comment
+// in the root models.go), so this never touches the chat model's process.
+func stopMediaBackend(cfg *gwConfig) {
+	if cfg == nil || cfg.MediaBackendPort == 0 {
+		return
+	}
+	killPort(cfg.MediaBackendPort)
 }
 
 // loadModelAsync runs `unified-gateway load <shortName>` out-of-process

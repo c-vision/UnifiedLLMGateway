@@ -86,7 +86,8 @@ func onReady() {
 	cfg, cfgErr := loadGWConfig()
 	modelItems := map[string]*systray.MenuItem{}
 	var mMLX, mDS4, mStartMLX, mStartDS4, mStopMLX, mStopDS4 *systray.MenuItem
-	var mlxDefault, ds4Default string
+	var mMedia, mStartMedia, mStopMedia *systray.MenuItem
+	var mlxDefault, ds4Default, mediaDefault string
 
 	if cfgErr != nil {
 		mMissing := systray.AddMenuItem("Backends unavailable (models.json not found)", "")
@@ -131,7 +132,10 @@ func onReady() {
 		addModelItems(mDS4, cfg, ds4Names, modelItems)
 
 		if len(mediaNames) > 0 {
-			mMedia := systray.AddMenuItem("Media Models (OCR, etc.)", "Special-purpose models kept out of the chat pickers")
+			mediaDefault = mediaNames[0]
+			mMedia = systray.AddMenuItem("Media Models (OCR, etc.)", "Special-purpose models kept out of the chat pickers -- runs on its own port, alongside whatever chat model is active, not instead of it")
+			mStartMedia = addStartItem(mMedia, "Start Media Models", mediaDefault, cfg.MediaBackendPort)
+			mStopMedia = mMedia.AddSubMenuItem("Stop Media Models", fmt.Sprintf("Stop the media backend on port %d", cfg.MediaBackendPort))
 			addModelItems(mMedia, cfg, mediaNames, modelItems)
 		}
 	}
@@ -181,6 +185,10 @@ func onReady() {
 		cfg:           cfg,
 		modelItems:    modelItems,
 		mCompression:  mCompression,
+		mMedia:        mMedia,
+		mStartMedia:   mStartMedia,
+		mStopMedia:    mStopMedia,
+		mediaDefault:  mediaDefault,
 	})
 
 	ollamaPort := 11434
@@ -199,6 +207,8 @@ func onReady() {
 				stopBackend(cfg)
 			case <-clickedOrNil(mStopDS4):
 				stopBackend(cfg)
+			case <-clickedOrNil(mStopMedia):
+				stopMediaBackend(cfg)
 			case <-mOllamaStart.ClickedCh:
 				go func() {
 					if confirmPortFree(ollamaPort, "Ollama") {
@@ -213,6 +223,7 @@ func onReady() {
 			case <-mStopAll.ClickedCh:
 				stopGateway()
 				stopBackend(cfg)
+				stopMediaBackend(cfg)
 				stopOllama()
 			case <-mCompression.ClickedCh:
 				state, ok := getCompressionState()

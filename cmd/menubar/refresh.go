@@ -28,6 +28,10 @@ type refreshRefs struct {
 	cfg           *gwConfig
 	modelItems    map[string]*systray.MenuItem
 	mCompression  *systray.MenuItem
+	mMedia        *systray.MenuItem // nil if no "kind":"media" entries configured
+	mStartMedia   *systray.MenuItem // permanently disabled by addStartItem if mediaDefault == ""
+	mStopMedia    *systray.MenuItem
+	mediaDefault  string // model Start Media Models loads; "" if none configured
 }
 
 // setEnabled is a small helper since MenuItem only exposes Enable/Disable,
@@ -129,6 +133,38 @@ func refreshLoop(r refreshRefs) {
 			setEnabled(r.mStopDS4, ds4Active)
 		}
 
+		// Media backend: same live-detection pattern as rapid-mlx/ds4 above,
+		// just pinned to cfg.MediaBackendPort instead of cfg.BackendPort --
+		// entirely independent state, since loading/stopping a media model
+		// never touches the chat backend (see ModelConfig.Kind in the root
+		// models.go). r.mMedia is nil when models.json has no "kind":"media"
+		// entries at all, in which case this whole block is a no-op.
+		var mediaModel string
+		var mediaActive bool
+		if r.cfg != nil && r.mMedia != nil {
+			mlxM, mlxA := runningMLXModel(r.cfg.MediaBackendPort)
+			ds4M, ds4A := runningDS4Model(r.cfg, r.cfg.MediaBackendPort)
+			switch {
+			case mlxA:
+				mediaModel, mediaActive = mlxM, true
+			case ds4A:
+				mediaModel, mediaActive = ds4M, true
+			}
+
+			switch {
+			case mediaActive && mediaModel != "":
+				r.mMedia.SetTitle(fmt.Sprintf("🟢 Media %s (port %d)", mediaModel, r.cfg.MediaBackendPort))
+			case mediaActive:
+				r.mMedia.SetTitle(fmt.Sprintf("🟢 Media (port %d)", r.cfg.MediaBackendPort))
+			default:
+				r.mMedia.SetTitle("🔴 Media Models (OCR, etc.)")
+			}
+			if r.mediaDefault != "" {
+				setEnabled(r.mStartMedia, !mediaActive)
+			}
+			setEnabled(r.mStopMedia, mediaActive)
+		}
+
 		ollamaPort := 11434
 		if r.cfg != nil && r.cfg.OllamaPort != 0 {
 			ollamaPort = r.cfg.OllamaPort
@@ -147,7 +183,7 @@ func refreshLoop(r refreshRefs) {
 		}
 
 		for name, item := range r.modelItems {
-			checked := (mlxActive && name == mlxModel) || (ds4Active && name == ds4Model)
+			checked := (mlxActive && name == mlxModel) || (ds4Active && name == ds4Model) || (mediaActive && name == mediaModel)
 			if !checked && ollUp && ollamaModel != "" && r.cfg != nil {
 				if m, ok := r.cfg.Models[name]; ok && m.Backend == "ollama" {
 					tag := m.OllamaModel
