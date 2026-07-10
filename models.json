@@ -92,10 +92,10 @@
       "model_type": "gpt_oss"
     },
     "ocr": {
-      "path": "~/ai/Models/media/ocr/unlimited-ocr-8bit-mlx",
-      "label": "Unlimited-OCR (DeepSeek-OCR, 8bit)",
+      "path": "~/ai/Models/media/ocr/PaddleOCR-VL-8bit",
+      "label": "PaddleOCR-VL (8bit)",
       "backend": "mlx",
-      "model_type": "deepseekocr",
+      "model_type": "paddleocr_vl",
       "has_vision": true,
       "kind": "media"
     },
