@@ -78,10 +78,18 @@ func onReady() {
 	mStatus := systray.AddMenuItem("Checking status...", "")
 	mStatus.Disable()
 
-	// Simplified live memory readout -- not clickable, just a status line,
-	// refreshed on the same 4s tick as everything else. See memory.go.
+	// Simplified live memory readout, refreshed on the same 4s tick as
+	// everything else (see memory.go). Deliberately left enabled rather
+	// than Disable()'d like mStatus above it -- macOS renders disabled
+	// items dimmed/grey, which made this hard to read. Left clickable
+	// with a no-op drain instead (same shape as the model items' own
+	// per-item goroutine below) so it renders at full contrast.
 	mMemory := systray.AddMenuItem("RAM: checking...", "Free RAM (vm_stat free+inactive) vs total physical memory")
-	mMemory.Disable()
+	go func() {
+		for range mMemory.ClickedCh {
+			// no-op -- informational only, click just needs somewhere to go
+		}
+	}()
 	systray.AddSeparator()
 
 	mStartGateway := systray.AddMenuItem("Start Gateway Adapters", "Start OpenAI (port 8082) and Anthropic (port 8083) adapters")
