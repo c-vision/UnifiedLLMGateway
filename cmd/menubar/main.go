@@ -77,6 +77,11 @@ func onReady() {
 
 	mStatus := systray.AddMenuItem("Checking status...", "")
 	mStatus.Disable()
+
+	// Simplified live memory readout -- not clickable, just a status line,
+	// refreshed on the same 4s tick as everything else. See memory.go.
+	mMemory := systray.AddMenuItem("RAM: checking...", "Free RAM (vm_stat free+inactive) vs total physical memory")
+	mMemory.Disable()
 	systray.AddSeparator()
 
 	mStartGateway := systray.AddMenuItem("Start Gateway Adapters", "Start OpenAI (port 8082) and Anthropic (port 8083) adapters")
@@ -193,6 +198,7 @@ func onReady() {
 
 	go refreshLoop(refreshRefs{
 		mStatus:       mStatus,
+		mMemory:       mMemory,
 		mStartGateway: mStartGateway,
 		mStopGateway:  mStopGateway,
 		mMLX:          mMLX,

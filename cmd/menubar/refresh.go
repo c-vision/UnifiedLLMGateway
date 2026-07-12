@@ -12,6 +12,7 @@ import (
 // and mStopDS4 are nil when models.json failed to load.
 type refreshRefs struct {
 	mStatus       *systray.MenuItem
+	mMemory       *systray.MenuItem // simplified live RAM readout, see memory.go
 	mStartGateway *systray.MenuItem
 	mStopGateway  *systray.MenuItem
 	mMLX          *systray.MenuItem
@@ -92,6 +93,10 @@ func refreshLoop(r refreshRefs) {
 					))
 				}
 			}
+		}
+
+		if r.mMemory != nil {
+			r.mMemory.SetTitle(memoryStatusLine())
 		}
 
 		statusLine := "🔴 stopped"
