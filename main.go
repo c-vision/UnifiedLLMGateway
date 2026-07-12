@@ -862,6 +862,7 @@ func main() {
 
 	g := NewGateway()
 	gin.SetMode(gin.ReleaseMode)
+	startMemoryWatchdog()
 
 	anthroSrv := gin.Default()
 	anthroSrv.Use(requestLogger()) // Enable logging for Anthropic API

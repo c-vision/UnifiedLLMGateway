@@ -59,15 +59,17 @@ type ModelConfig struct {
 }
 
 type Config struct {
-	BackendPort      int                    `json:"backend_port"`
-	OllamaPort       int                    `json:"ollama_port,omitempty"`
-	MediaBackendPort int                    `json:"media_backend_port,omitempty"`
-	FluxBackendPort  int                    `json:"flux_backend_port,omitempty"`
-	VenvDir          string                 `json:"venv_dir"`
-	DS4Dir           string                 `json:"ds4_dir"`
-	MfluxVenvDir     string                 `json:"mflux_venv_dir,omitempty"`
-	FluxServerScript string                 `json:"flux_server_script,omitempty"`
-	Models           map[string]ModelConfig `json:"models"`
+	BackendPort                    int                    `json:"backend_port"`
+	OllamaPort                     int                    `json:"ollama_port,omitempty"`
+	MediaBackendPort               int                    `json:"media_backend_port,omitempty"`
+	FluxBackendPort                int                    `json:"flux_backend_port,omitempty"`
+	VenvDir                        string                 `json:"venv_dir"`
+	DS4Dir                         string                 `json:"ds4_dir"`
+	MfluxVenvDir                   string                 `json:"mflux_venv_dir,omitempty"`
+	FluxServerScript               string                 `json:"flux_server_script,omitempty"`
+	MemoryWatchdogThresholdPercent float64                `json:"memory_watchdog_threshold_percent,omitempty"`
+	MemoryWatchdogIntervalSeconds  int                    `json:"memory_watchdog_interval_seconds,omitempty"`
+	Models                         map[string]ModelConfig `json:"models"`
 }
 
 func expandHome(path string) string {
@@ -107,6 +109,15 @@ func loadConfig() (*Config, error) {
 	}
 	if cfg.FluxBackendPort == 0 {
 		cfg.FluxBackendPort = cfg.MediaBackendPort + 1
+	}
+	// 0 (absent from models.json) means "use the default, watchdog on."
+	// A negative value is the explicit opt-out (free% can never go
+	// negative, so the check in checkMemoryPressure never fires).
+	if cfg.MemoryWatchdogThresholdPercent == 0 {
+		cfg.MemoryWatchdogThresholdPercent = defaultWatchdogThresholdPercent
+	}
+	if cfg.MemoryWatchdogIntervalSeconds == 0 {
+		cfg.MemoryWatchdogIntervalSeconds = defaultWatchdogIntervalSeconds
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
