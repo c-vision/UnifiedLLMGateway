@@ -42,6 +42,13 @@
       "model_type": "qwen3_5",
       "has_vision": false
     },
+    "qwopuscoder": {
+      "path": "~/ai/Models/Qwopus3.6-35B-A3B-Coder-mlx-5Bit",
+      "label": "Qwopus3.6-35B-A3B-Coder (MoE, 5-bit)",
+      "backend": "mlx",
+      "model_type": "qwen3_5",
+      "has_vision": true
+    },
     "qw27opus": {
       "path": "~/ai/Models/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit",
       "label": "Qwen3.5-27B Claude-Opus-Distilled",
