@@ -75,21 +75,6 @@
       "label": "DeepSeek-R1-32B",
       "backend": "mlx"
     },
-    "ds26": {
-      "path": "~/ai/Models/DeepSeek-R1-Distill-Qwen-32B-2,6_mixed",
-      "label": "DeepSeek-R1-32B-2,6",
-      "backend": "mlx"
-    },
-    "ds34": {
-      "path": "~/ai/Models/DeepSeek-R1-Distill-Qwen-32B-3,4_mixed",
-      "label": "DeepSeek-R1-32B-3,4",
-      "backend": "mlx"
-    },
-    "ds36": {
-      "path": "~/ai/Models/DeepSeek-R1-Distill-Qwen-32B-3,6_mixed",
-      "label": "DeepSeek-R1-32B-3,6",
-      "backend": "mlx"
-    },
     "gemma4": {
       "path": "~/ai/Models/gemma-4-31b-it-4bit",
       "label": "Gemma 4 31B",
