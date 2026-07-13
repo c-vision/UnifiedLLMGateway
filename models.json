@@ -49,6 +49,20 @@
       "model_type": "qwen3_5",
       "has_vision": true
     },
+    "qw3coder": {
+      "path": "~/ai/Models/Qwen3-Coder-30B-A3B-Instruct-4bit",
+      "label": "Qwen3-Coder-30B-A3B (MoE, official, 4-bit)",
+      "backend": "mlx",
+      "model_type": "qwen3_moe",
+      "has_vision": false
+    },
+    "glm45air": {
+      "path": "~/ai/Models/GLM-4.5-Air-4bit",
+      "label": "GLM-4.5-Air (MoE, 12B active, 4-bit)",
+      "backend": "mlx",
+      "model_type": "glm4_moe",
+      "has_vision": false
+    },
     "qw27opus": {
       "path": "~/ai/Models/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit",
       "label": "Qwen3.5-27B Claude-Opus-Distilled",
