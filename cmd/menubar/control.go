@@ -24,6 +24,7 @@ type modelConfig struct {
 	Backend     string `json:"backend"`
 	OllamaModel string `json:"ollama_model,omitempty"`
 	Kind        string `json:"kind,omitempty"`
+	Ctx         int    `json:"ctx,omitempty"`
 }
 
 // MediaBackendPort/FluxBackendPort are the two media POOLS -- OCR-like

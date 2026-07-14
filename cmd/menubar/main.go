@@ -7,7 +7,9 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 
 	"github.com/getlantern/systray"
 )
@@ -27,10 +29,47 @@ func main() {
 // exactly like `unified-gateway load <name>` already behaves on the
 // command line.
 func addModelItems(parent *systray.MenuItem, cfg *gwConfig, names []string, modelItems map[string]*systray.MenuItem) {
-	sort.Strings(names)
+	// Sorted by on-disk size (smallest first), not alphabetically -- that's
+	// the number that actually decides whether a model coexists with
+	// whatever else is running, so it's the more useful ordering in a menu
+	// you're scanning to pick one. Note this reads live off disk: a model
+	// that's still downloading will sort/display by its current partial
+	// size until the download finishes, not its final size. Entries with
+	// no computable disk size (ollama backend: weights aren't at a local
+	// path this app can see) sort last, grouped together, rather than
+	// being guessed into the middle.
+	sort.Strings(names) // stable alphabetical tie-break before the real sort
+	sort.SliceStable(names, func(i, j int) bool {
+		di, dj := estimateDiskGB(cfg.Models[names[i]].Path), estimateDiskGB(cfg.Models[names[j]].Path)
+		if di == 0 {
+			di = math.Inf(1)
+		}
+		if dj == 0 {
+			dj = math.Inf(1)
+		}
+		return di < dj
+	})
 	for _, n := range names {
 		m := cfg.Models[n]
-		label := fmt.Sprintf("%s (%s)", m.Label, n)
+		var extra []string
+		if m.Ctx > 0 {
+			extra = append(extra, formatCtx(m.Ctx))
+		}
+		if disk := estimateDiskGB(m.Path); disk > 0 {
+			extra = append(extra, fmt.Sprintf("%.0fGB", disk))
+		}
+		// Insert ctx/disk into m.Label's own trailing "(...)" group (the
+		// quantization info) rather than the "(shortname)" group added
+		// below -- every label in models.json ends in ")", so this is a
+		// straight strip-and-reclose rather than real parsing.
+		displayLabel := m.Label
+		if len(extra) > 0 && strings.HasSuffix(displayLabel, ")") {
+			displayLabel = strings.TrimSuffix(displayLabel, ")") + ", " + strings.Join(extra, ", ") + ")"
+		}
+		label := fmt.Sprintf("%s (%s)", displayLabel, n)
+		if icon, ok := codingQualityIcon[n]; ok {
+			label = icon + " " + label
+		}
 		item := parent.AddSubMenuItem(label, "Load "+n)
 		modelItems[n] = item
 		go func(shortName string, item *systray.MenuItem) {

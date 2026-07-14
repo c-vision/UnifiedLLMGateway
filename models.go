@@ -54,6 +54,7 @@ type ModelConfig struct {
 	ModelType   string `json:"model_type,omitempty"`
 	HasVision   bool   `json:"has_vision,omitempty"`
 	Ctx         int    `json:"ctx,omitempty"`
+	QuantBits   int    `json:"quant_bits,omitempty"`
 	OllamaModel string `json:"ollama_model,omitempty"`
 	Kind        string `json:"kind,omitempty"`
 }
@@ -69,6 +70,7 @@ type Config struct {
 	FluxServerScript               string                 `json:"flux_server_script,omitempty"`
 	MemoryWatchdogThresholdPercent float64                `json:"memory_watchdog_threshold_percent,omitempty"`
 	MemoryWatchdogIntervalSeconds  int                    `json:"memory_watchdog_interval_seconds,omitempty"`
+	StallWatchdogThresholdSeconds  int                    `json:"stall_watchdog_threshold_seconds,omitempty"`
 	Models                         map[string]ModelConfig `json:"models"`
 }
 
@@ -118,6 +120,9 @@ func loadConfig() (*Config, error) {
 	}
 	if cfg.MemoryWatchdogIntervalSeconds == 0 {
 		cfg.MemoryWatchdogIntervalSeconds = defaultWatchdogIntervalSeconds
+	}
+	if cfg.StallWatchdogThresholdSeconds == 0 {
+		cfg.StallWatchdogThresholdSeconds = defaultStallWatchdogThresholdSeconds
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
@@ -403,7 +408,33 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cm
 	// workload PFlash was supposed to help: it shrinks the KV cache's
 	// per-token footprint, letting more conversation history stay
 	// cache-resident before capacity eviction forces a recompute.
-	args = append(args, "--kv-cache-turboquant")
+	// k8v4 (K=8-bit Walsh-Hadamard, V=4-bit Lloyd-Max) instead of the bare
+	// flag's v4 default (V-only, K stays fp16). Measured 2026-07-14 on
+	// qw3635 with matched cold prompts at two context sizes: at ~19k
+	// tokens v4 and k8v4 are a wash (75 vs 77 tok/s decode), but at ~80k
+	// tokens k8v4 wins clearly (48.8 vs 63.6 tok/s decode, +30%) because
+	// decode on Apple Silicon is bandwidth-bound on the KV-cache read as
+	// context grows, and k8v4 roughly halves what has to be read per
+	// token vs v4. No quality regression observed in spot checks. This
+	// directly targets the "slows down on long prompts" symptom that
+	// PFlash was originally meant to help with (see below) -- unlike
+	// PFlash, it doesn't touch the prefix-cache path at all.
+	//
+	// EXCEPT for 8-bit weight-quantized models: measured 2026-07-14 on
+	// qw3coder8bit, same prompt/config -- v4 gave ~79 tok/s, k8v4 gave
+	// ~5.9 tok/s. A 13x regression, not a wash, reproduced twice. Only
+	// ever benchmarked k8v4 against 4-bit/5-bit weights (qw3635,
+	// qwopuscoder) before making it the default; never against 8-bit.
+	// Whatever's happening (K-cache's own 8-bit quantization colliding
+	// with the model weights' 8-bit quantization on the same Metal
+	// kernel path is the leading guess) it's model-weight-precision
+	// specific, not something PFlash/prefix-cache/context-length
+	// explains -- so gate strictly on QuantBits, not on model size or type.
+	turboQuant := "k8v4"
+	if m.QuantBits == 8 {
+		turboQuant = "v4"
+	}
+	args = append(args, "--kv-cache-turboquant", turboQuant)
 	// PFlash OFF by default: rapid-mlx's own metrics.py documents that
 	// "when PFlash compression engages, the prompt skips the prefix-cache
 	// fetch + store paths entirely" -- and qw3627/qw27/etc are

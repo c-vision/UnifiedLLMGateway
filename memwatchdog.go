@@ -83,12 +83,23 @@ func startMemoryWatchdog() {
 		"[unified-gateway] memory watchdog active: restart loaded backends if free RAM drops below %.0f%% of %.0f GB total (checked every %s)\n",
 		cfg.MemoryWatchdogThresholdPercent, total, interval,
 	)
+	if cfg.StallWatchdogThresholdSeconds >= 0 {
+		fmt.Printf(
+			"[unified-gateway] stall watchdog active: restart the chat backend if a request sits with no token progress for %ds (checked every %s)\n",
+			cfg.StallWatchdogThresholdSeconds, interval,
+		)
+	} else {
+		fmt.Println("[unified-gateway] stall watchdog: disabled (negative threshold in models.json)")
+	}
 
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for range ticker.C {
 			checkMemoryPressure(total)
+			if liveCfg, err := loadConfig(); err == nil {
+				checkRequestStall(liveCfg)
+			}
 		}
 	}()
 }
