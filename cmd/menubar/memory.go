@@ -19,35 +19,55 @@ import (
 // memcheck.go/memwatchdog.go -- duplicated rather than shared, see
 // gwConfig's doc comment above for why (two separate "main" packages).
 
-// freeRAMGB returns free+inactive pages from vm_stat, in GB. Apple Silicon
-// only (16KB page size).
+// freeRAMGB returns available RAM in GB as total physical memory minus the
+// sum of every live process's RSS (2026-07-15 rewrite, same reasoning as
+// the root package's memcheck.go -- kept in sync by hand, see this
+// package's doc comment above for why it's duplicated rather than
+// shared). Replaced a vm_stat "Pages free + Pages inactive" calculation
+// that measurably undercounted real availability: vm_stat's free+inactive
+// ignores active/speculative/file-backed cache pages that aren't part of
+// any live process's resident set but are reclaimed first under real
+// pressure. Verified directly against mactop's own reading on this
+// machine (ps -axo rss sum ~36-37GB used, matching mactop).
 func freeRAMGB() float64 {
-	out, err := exec.Command("vm_stat").Output()
+	total := totalRAMGB()
+	if total <= 0 {
+		return 0
+	}
+	used, err := usedRAMGB()
 	if err != nil {
 		return 0
 	}
-	var free, inactive float64
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "Pages free") {
-			free = parseVMStatPages(line)
-		} else if strings.Contains(line, "Pages inactive") {
-			inactive = parseVMStatPages(line)
-		}
+	avail := total - used
+	if avail < 0 {
+		avail = 0
 	}
-	const pageSize = 16384.0
-	return (free + inactive) * pageSize / (1024 * 1024 * 1024)
+	return avail
 }
 
-func parseVMStatPages(line string) float64 {
-	parts := strings.SplitN(line, ":", 2)
-	if len(parts) != 2 {
-		return 0
-	}
-	v, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(parts[1]), "."), 64)
+// usedRAMGB sums the RSS of every live process via `ps -axo rss=`. Not
+// adjusted for shared pages (see memcheck.go's copy for the full
+// rationale) -- kept simple because it's what was verified against
+// mactop, and the vm_stat alternative was confirmed wrong in the other
+// direction.
+func usedRAMGB() (float64, error) {
+	out, err := exec.Command("ps", "-axo", "rss=").Output()
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return v
+	var sumKB float64
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(line, 64)
+		if err != nil {
+			continue
+		}
+		sumKB += v
+	}
+	return sumKB / (1024 * 1024), nil
 }
 
 // totalRAMGB returns total physical memory in GB via sysctl.

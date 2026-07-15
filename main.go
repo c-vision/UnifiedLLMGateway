@@ -754,6 +754,28 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 					log.Printf("🗜️  prompt compression saved ~%d chars", saved)
 				}
 			}
+			// gpt-oss's harmony reasoning format has no launch-time "keep it
+			// short" knob (only the all-or-nothing --no-thinking, which would
+			// throw away chain-of-thought entirely) -- observed directly
+			// (2026-07-15): with no reasoning_effort at all, gpt-oss-20b
+			// spent its ENTIRE max_tokens budget on reasoning_content and
+			// returned a truncated, unusable answer. Inject "low" here, but
+			// only when the client didn't already ask for something --
+			// mirrors rapid-mlx's own R12-T1F rule ("explicit client value
+			// always wins") one layer up, for a client (Pi with
+			// supportsReasoningEffort:false, set that way for an unrelated
+			// qwopus tool-call bug) that currently never sends this field to
+			// any model, gpt-oss included.
+			if originalModel != "" {
+				if _, hasReasoningEffort := payload["reasoning_effort"]; !hasReasoningEffort {
+					if cfg, err := loadConfig(); err == nil {
+						if mc, ok := cfg.Models[originalModel]; ok && mc.ModelType == "gpt_oss" {
+							payload["reasoning_effort"] = "low"
+							modified = true
+						}
+					}
+				}
+			}
 			if modified {
 				if rewritten, err := json.Marshal(payload); err == nil {
 					bodyBytes = rewritten

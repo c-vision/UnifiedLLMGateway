@@ -26,6 +26,37 @@ var codingQualityIcon = map[string]string{
 	"qw27opus": "🟡",
 	"qw122":    "🟡",
 
+	// Promising on paper, unverified in this catalog's own real-world
+	// agentic use yet: gptoss20 reportedly beats its own 120B sibling on
+	// HumanEval/MMLU despite being 6x smaller (2026-07-15 research), but
+	// that's a benchmark claim, not something tested here the way the 🟢
+	// tier above was. Benchmark-good has burned this catalog before on
+	// real agentic tool-calling (Qwopus, removed 2026-07-14 for exactly
+	// this gap). Bump to 🟢 once actually exercised.
+	"gptoss20": "🟡",
+
+	// Untested additions (2026-07-15). glm47flash is an official zai-org
+	// release in the same lineage as glm45air (🟢) -- same reasoning/tool
+	// format, far fewer active experts (4 routed + 1 shared of 65 vs
+	// glm45air's 12B active), so plausibly a fast option for the same
+	// large-C#-project use case where glm45air was too slow -- but
+	// unverified until actually run. bonsai4b is a 4B dense model at
+	// extreme ternary (~2-bit) quantization from a research lab (Prism
+	// ML): tiny and fast by construction, but this catalog's own findings
+	// this session are that small dense models struggle on large real C#
+	// work, and 2-bit is far more aggressive than any other quant in this
+	// catalog -- treat with at least as much caution as gptoss20 got.
+	"glm47flash": "🟡",
+	"bonsai4b":   "🟡",
+
+	// qw3codernext (2026-07-15, still downloading when added): official
+	// Qwen-Coder branding, same family as qw3coder/qw3coder6bit/8bit (🟢
+	// above) -- stronger prior than the other 🟡 entries, but still
+	// unverified in this catalog's own real agentic use, so held to the
+	// same bar until actually exercised rather than promoted on lineage
+	// alone.
+	"qw3codernext": "🟡",
+
 	// Weaker or not coding-focused: dense/slow (mixtral confirmed
 	// "praticamente inutilizzabile" this session), reasoning-tuned rather
 	// than code-tuned (ds32), or general chat models never marketed for

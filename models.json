@@ -129,6 +129,43 @@
       "model_type": "gpt_oss",
       "ctx": 131072
     },
+    "gptoss20": {
+      "path": "~/ai/Models/gpt-oss-20b-MXFP4-Q8",
+      "label": "GPT-OSS-20B (MoE, 4/32 experts, mxfp4)",
+      "backend": "mlx",
+      "model_type": "gpt_oss",
+      "has_vision": false,
+      "ctx": 131072,
+      "quant_bits": 4
+    },
+    "bonsai4b": {
+      "path": "~/ai/Models/Ternary-Bonsai-4B-mlx-2bit",
+      "label": "Ternary-Bonsai-4B (dense, Qwen3-4B base, ternary/2-bit)",
+      "backend": "mlx",
+      "model_type": "qwen3",
+      "has_vision": false,
+      "ctx": 32768,
+      "quant_bits": 2,
+      "tool_call_parser": "hermes"
+    },
+    "glm47flash": {
+      "path": "~/ai/Models/GLM-4.7-Flash-8bit",
+      "label": "GLM-4.7-Flash (MoE, 4/64+1 shared experts, 8-bit)",
+      "backend": "mlx",
+      "model_type": "glm4_moe_lite",
+      "has_vision": false,
+      "ctx": 202752,
+      "quant_bits": 8
+    },
+    "qw3codernext": {
+      "path": "~/ai/Models/Qwen3-Coder-Next-mxfp4-mlx",
+      "label": "Qwen3-Coder-Next (MoE, 10/512+1 shared experts, mxfp4)",
+      "backend": "mlx",
+      "model_type": "qwen3_next",
+      "has_vision": false,
+      "ctx": 262144,
+      "quant_bits": 4
+    },
     "ocr": {
       "path": "~/ai/Models/media/ocr/PaddleOCR-VL-8bit",
       "label": "PaddleOCR-VL (8bit)",

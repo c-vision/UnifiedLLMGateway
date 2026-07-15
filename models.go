@@ -57,6 +57,18 @@ type ModelConfig struct {
 	QuantBits   int    `json:"quant_bits,omitempty"`
 	OllamaModel string `json:"ollama_model,omitempty"`
 	Kind        string `json:"kind,omitempty"`
+	// ToolCallParser overrides rapid-mlx's own tool-call-format
+	// auto-detection (vllm_mlx/model_auto_config.py), which matches
+	// regexes against the model PATH STRING, not model_type -- e.g.
+	// "qwen3" only fires if that substring literally appears in the
+	// directory/repo name. Rebranded checkpoints (bonsai4b:
+	// "Ternary-Bonsai-4B-mlx-2bit", base model Qwen3-4B per its own
+	// README, but no "qwen3" anywhere in the path) fall through to no
+	// parser at all -- tool calls silently don't work, not a loud
+	// failure. Set explicitly here for any model whose path won't
+	// self-match; passed as "--tool-call-parser <value>
+	// --enable-auto-tool-choice" in launchMLX.
+	ToolCallParser string `json:"tool_call_parser,omitempty"`
 }
 
 type Config struct {
@@ -394,6 +406,9 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cm
 	}
 	if m.ModelType == "qwen3" || m.ModelType == "qwen3_5" || m.ModelType == "qwen2_moe" {
 		args = append(args, "--no-spec-decode")
+	}
+	if m.ToolCallParser != "" {
+		args = append(args, "--tool-call-parser", m.ToolCallParser, "--enable-auto-tool-choice")
 	}
 	cacheMB := mlxCacheReserveMBFor(estimateModelSizeGB(m))
 	args = append(args, "--cache-memory-mb", fmt.Sprintf("%d", cacheMB))

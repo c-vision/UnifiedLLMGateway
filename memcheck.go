@@ -57,36 +57,63 @@ func mlxCacheReserveMBFor(modelSizeGB float64) int {
 
 const memoryMarginFraction = 0.10 // 10% headroom beyond the raw model size
 
-// freeRAMGB returns free+inactive pages from vm_stat, in GB. Apple Silicon
-// Macs use a 16KB page size (vs 4KB on Intel) -- this assumes Apple
-// Silicon, which is what rapid-mlx/MLX requires anyway.
+// freeRAMGB returns available RAM in GB as total physical memory minus the
+// sum of every live process's RSS (2026-07-15 rewrite -- replaced a
+// vm_stat "Pages free + Pages inactive" calculation that measurably
+// undercounted what was actually available and was blocking loads of
+// larger models the machine had real room for). vm_stat's free+inactive
+// only counts pages already sitting idle; it ignores "active"/
+// "speculative"/file-backed cache pages that aren't part of any live
+// process's resident set -- disk cache and prefetch, not real
+// application memory pressure, and macOS reclaims exactly this kind of
+// page first under pressure. Direct comparison on this machine: vm_stat
+// free+inactive read ~64GB while total-RSS read ~91GB (37GB used across
+// ~900 processes) with 128GB installed -- the gap is precisely that
+// reclaimable-but-not-idle memory. total-RSS matches what mactop (the
+// user's reference terminal monitor) reports, confirmed directly by the
+// user (ps -axo rss sum ~36-37GB used, matching mactop's own reading).
 func freeRAMGB() float64 {
-	out, err := exec.Command("vm_stat").Output()
+	total := totalRAMGB()
+	if total <= 0 {
+		return 0
+	}
+	used, err := usedRAMGB()
 	if err != nil {
 		return 0
 	}
-	var free, inactive float64
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "Pages free") {
-			free = parseVMStatPages(line)
-		} else if strings.Contains(line, "Pages inactive") {
-			inactive = parseVMStatPages(line)
-		}
+	avail := total - used
+	if avail < 0 {
+		avail = 0
 	}
-	const pageSize = 16384.0
-	return (free + inactive) * pageSize / (1024 * 1024 * 1024)
+	return avail
 }
 
-func parseVMStatPages(line string) float64 {
-	parts := strings.SplitN(line, ":", 2)
-	if len(parts) != 2 {
-		return 0
-	}
-	v, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(parts[1]), "."), 64)
+// usedRAMGB sums the RSS of every live process via `ps -axo rss=` --
+// deliberately not adjusted for shared pages (multiple processes mapping
+// the same dyld shared cache, frameworks, etc. each count their share of
+// it), which in principle can overcount true physical usage. Kept simple
+// anyway because it's what was verified against mactop's own number on
+// this machine, and the alternative (vm_stat free+inactive) was
+// confirmed wrong in the other direction, blocking loads that had real
+// headroom.
+func usedRAMGB() (float64, error) {
+	out, err := exec.Command("ps", "-axo", "rss=").Output()
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return v
+	var sumKB float64
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(line, 64)
+		if err != nil {
+			continue
+		}
+		sumKB += v
+	}
+	return sumKB / (1024 * 1024), nil
 }
 
 // estimateModelSizeGB estimates a model's resident memory footprint from
