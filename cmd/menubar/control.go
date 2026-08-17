@@ -296,6 +296,36 @@ type compressionState struct {
 	DecisionCacheEntries int   `json:"decision_cache_entries"`
 }
 
+// formatCount renders a count with a K/M suffix -- same idea as
+// memoryStatusLine's GB formatting, kept in the menu title so the
+// numbers that matter are visible at a glance instead of requiring a
+// tooltip hover (same treatment as the RAM readout).
+func formatCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// compressionStatusLine is the menu item TITLE (not just tooltip) for
+// Prompt Compression -- mirrors memoryStatusLine's "visible at a glance"
+// treatment. decision_cache_entries is surfaced first and most
+// prominently: it's the number that confirms the 2026-08-17 prefix-cache
+// stability fix is actually engaging during a real long session (see
+// Overview.md, ventinovesima iterazione), which is exactly what prompted
+// this readout.
+func compressionStatusLine(state compressionState) string {
+	if !state.Enabled {
+		return "🗜️ Compression: off"
+	}
+	return fmt.Sprintf("🗜️ Compression: %d cached · %s saved",
+		state.DecisionCacheEntries, formatCount(state.CharsSaved))
+}
+
 // getCompressionState asks the gateway for prompt-compression's current
 // live state (toggle + cumulative savings). ok is false when the gateway
 // itself isn't reachable, so the caller can distinguish "off" from

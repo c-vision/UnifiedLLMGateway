@@ -87,6 +87,7 @@ func refreshLoop(r refreshRefs) {
 					} else {
 						r.mCompression.Uncheck()
 					}
+					r.mCompression.SetTitle(compressionStatusLine(state))
 					r.mCompression.SetTooltip(fmt.Sprintf(
 						"Trim stale/duplicate old-message content before it reaches the model — takes effect instantly, no restart\n%d requests compressed, %d chars saved this session\n%d messages with a stable (cached) sparse-selection form — stays fixed turn to turn to keep rapid-mlx's prefix cache usable",
 						state.RequestsCompressed, state.CharsSaved, state.DecisionCacheEntries,
