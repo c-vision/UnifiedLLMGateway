@@ -290,9 +290,10 @@ func gatewayCurrentModel() string {
 
 // compressionState mirrors the gateway's GET /v1/compression response.
 type compressionState struct {
-	Enabled            bool  `json:"enabled"`
-	RequestsCompressed int64 `json:"requests_compressed"`
-	CharsSaved         int64 `json:"chars_saved"`
+	Enabled              bool  `json:"enabled"`
+	RequestsCompressed   int64 `json:"requests_compressed"`
+	CharsSaved           int64 `json:"chars_saved"`
+	DecisionCacheEntries int   `json:"decision_cache_entries"`
 }
 
 // getCompressionState asks the gateway for prompt-compression's current
