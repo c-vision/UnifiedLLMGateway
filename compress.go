@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -143,6 +144,129 @@ func normalizedShape(content string) string {
 	}
 	sum := sha256.Sum256([]byte(strings.ToLower(b.String())))
 	return hex.EncodeToString(sum[:])
+}
+
+// Stable sparse-selection decisions (2026-08-17): sparsifyContent's block
+// selection depends on queryKeywords(), which reads the CURRENT latest
+// user message -- so a large old message that qualifies for sparse
+// selection could have DIFFERENT blocks kept on every single turn, purely
+// because "the current query" keeps changing, even though the old message
+// itself never does. That means the byte sequence rapid-mlx sees at that
+// message's position changes on every turn, which breaks its token-level
+// prefix cache (radix tree, exact/prefix/LCP match, content-addressed --
+// unified-gateway has no session id to key on instead) for everything
+// after that point: a near-full re-prefill on EVERY turn of a long
+// conversation instead of just the genuinely new tail. sparseGateChars
+// sits at ~37k tokens total, comfortably inside the 80-100k range where
+// the symptom was reported. Full diagnosis: Overview.md (unified-gateway
+// vault), ventinovesima iterazione.
+//
+// Dedup (exact + near-duplicate) and plain head+tail truncation do NOT
+// have this problem and are deliberately left uncached: both are already
+// pure functions of the message's own content (truncation) or of whether
+// a later identical/near-identical message exists (dedup, which — for an
+// append-only conversation — can only ever flip from "not yet a
+// duplicate" to "duplicate", never back, so recomputing it fresh is
+// already stable and lets a genuinely new later duplicate still collapse
+// an earlier copy on a future turn). Caching the FULL per-message
+// decision (tried first, reverted) was wrong for a sharper reason: two
+// DIFFERENT messages can share byte-identical content (e.g. the same file
+// read twice) while needing DIFFERENT treatment -- the earlier occurrence
+// gets dedup-collapsed, the later "authoritative" one gets sparsified --
+// and a cache keyed on content alone let the first one's decision leak
+// into the second (caught by TestCompressionEval_SparseAndNearDup).
+// Sparsify has no such conflict: a message only reaches this cache if
+// dedup has ALREADY (freshly, correctly) determined it's the one
+// authoritative copy to keep, so at most one message per unique content
+// string ever calls into it per compressMessages pass.
+const compressionDecisionCacheCap = 10000
+
+var (
+	compressionDecisionMu    sync.Mutex
+	compressionDecisionCache = make(map[string]string)
+)
+
+func compressionCacheKey(role, content string) string {
+	sum := sha256.Sum256([]byte(role + "\x00" + content))
+	return hex.EncodeToString(sum[:])
+}
+
+func compressionDecisionCacheSize() int {
+	compressionDecisionMu.Lock()
+	defer compressionDecisionMu.Unlock()
+	return len(compressionDecisionCache)
+}
+
+// cachedSparsify returns sparsifyContent's result for (role, content),
+// computing it only the first time this exact pair is seen and reusing
+// that block selection on every later call -- see the doc comment above.
+// ok mirrors sparsifyContent's own "dropped > 0" signal.
+func cachedSparsify(role, content string, keywords map[string]bool) (result string, ok bool) {
+	key := compressionCacheKey(role, content)
+
+	compressionDecisionMu.Lock()
+	cached, hit := compressionDecisionCache[key]
+	compressionDecisionMu.Unlock()
+	if hit {
+		return cached, true
+	}
+
+	sparsified, dropped := sparsifyContent(content, keywords, sparseKeepRatio)
+	if dropped <= 0 {
+		return "", false
+	}
+
+	compressionDecisionMu.Lock()
+	if len(compressionDecisionCache) < compressionDecisionCacheCap {
+		compressionDecisionCache[key] = sparsified
+	}
+	compressionDecisionMu.Unlock()
+	return sparsified, true
+}
+
+// computeCompressedContent applies the per-message compression rules
+// (tool-result dedup/near-dup, then sparse-block selection or head+tail
+// truncation) to a single message. Only the sparsify step is cached (see
+// cachedSparsify) -- dedup and truncation are recomputed fresh every call,
+// deliberately (see doc comment above).
+func computeCompressedContent(i int, role, content string, lastIndexOf, lastShapeIndexOf map[string]int, sparseGated bool, keywords map[string]bool) (string, bool) {
+	if role == "tool" && len(content) >= compressDedupMinChars {
+		if lastIdx, dup := lastIndexOf[contentSignature(content)]; dup && lastIdx != i {
+			placeholder := fmt.Sprintf(
+				"[contenuto duplicato (%d caratteri) -- la versione più recente compare più avanti nella conversazione]",
+				len(content),
+			)
+			return placeholder, true
+		}
+		// Not byte-identical, but the same shape (digits/whitespace aside)
+		// recurs later -- e.g. the same file re-read with one line number
+		// or timestamp changed. Exact dedup above can't catch this; the
+		// normalized signature can.
+		if lastIdx, dup := lastShapeIndexOf[normalizedShape(content)]; dup && lastIdx != i {
+			placeholder := fmt.Sprintf(
+				"[contenuto simile (%d caratteri, differenze minori come numeri o timestamp) -- la versione più recente compare più avanti nella conversazione]",
+				len(content),
+			)
+			return placeholder, true
+		}
+	}
+
+	if len(content) > compressTruncateThreshold {
+		if sparseGated {
+			if sparsified, ok := cachedSparsify(role, content, keywords); ok {
+				return sparsified, true
+			}
+			// Too few blocks to sparsify usefully -- fall through to plain
+			// head+tail truncation below instead.
+		}
+		omitted := len(content) - compressHeadKeepChars - compressTailKeepChars
+		truncated := content[:compressHeadKeepChars] +
+			fmt.Sprintf("\n\n[...%d caratteri omessi...]\n\n", omitted) +
+			content[len(content)-compressTailKeepChars:]
+		return truncated, true
+	}
+
+	return content, false
 }
 
 func cloneMessage(m map[string]interface{}) map[string]interface{} {
@@ -337,54 +461,13 @@ func compressMessages(messages []interface{}) ([]interface{}, int) {
 		if !ok {
 			continue
 		}
+		role, _ := msg["role"].(string)
 
-		if msg["role"] == "tool" && len(content) >= compressDedupMinChars {
-			if lastIdx, dup := lastIndexOf[contentSignature(content)]; dup && lastIdx != i {
-				clone := cloneMessage(msg)
-				placeholder := fmt.Sprintf(
-					"[contenuto duplicato (%d caratteri) -- la versione più recente compare più avanti nella conversazione]",
-					len(content),
-				)
-				clone["content"] = placeholder
-				savedChars += len(content) - len(placeholder)
-				out[i] = clone
-				continue
-			}
-			// Not byte-identical, but the same shape (digits/whitespace
-			// aside) recurs later -- e.g. the same file re-read with one
-			// line number or timestamp changed. Exact dedup above can't
-			// catch this; the normalized signature can.
-			if lastIdx, dup := lastShapeIndexOf[normalizedShape(content)]; dup && lastIdx != i {
-				clone := cloneMessage(msg)
-				placeholder := fmt.Sprintf(
-					"[contenuto simile (%d caratteri, differenze minori come numeri o timestamp) -- la versione più recente compare più avanti nella conversazione]",
-					len(content),
-				)
-				clone["content"] = placeholder
-				savedChars += len(content) - len(placeholder)
-				out[i] = clone
-				continue
-			}
-		}
-
-		if len(content) > compressTruncateThreshold {
-			if sparseGated {
-				if sparsified, dropped := sparsifyContent(content, keywords, sparseKeepRatio); dropped > 0 {
-					clone := cloneMessage(msg)
-					clone["content"] = sparsified
-					savedChars += dropped
-					out[i] = clone
-					continue
-				}
-				// Too few blocks to sparsify usefully -- fall through to
-				// plain head+tail truncation below instead.
-			}
+		newContent, changed := computeCompressedContent(i, role, content, lastIndexOf, lastShapeIndexOf, sparseGated, keywords)
+		if changed {
 			clone := cloneMessage(msg)
-			omitted := len(content) - compressHeadKeepChars - compressTailKeepChars
-			clone["content"] = content[:compressHeadKeepChars] +
-				fmt.Sprintf("\n\n[...%d caratteri omessi...]\n\n", omitted) +
-				content[len(content)-compressTailKeepChars:]
-			savedChars += omitted
+			clone["content"] = newContent
+			savedChars += len(content) - len(newContent)
 			out[i] = clone
 		}
 	}

@@ -713,9 +713,10 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 			setPromptCompressionEnabled(body.Enabled)
 		}
 		c.JSON(200, gin.H{
-			"enabled":             promptCompressionEnabled(),
-			"requests_compressed": compressionStats.requestsCompressed.Load(),
-			"chars_saved":         compressionStats.charsSaved.Load(),
+			"enabled":                promptCompressionEnabled(),
+			"requests_compressed":    compressionStats.requestsCompressed.Load(),
+			"chars_saved":            compressionStats.charsSaved.Load(),
+			"decision_cache_entries": compressionDecisionCacheSize(),
 		})
 		return
 	}

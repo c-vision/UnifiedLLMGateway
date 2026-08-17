@@ -5,11 +5,26 @@ import (
 	"testing"
 )
 
+// resetCompressionDecisionCache clears the stable per-message compression
+// cache (compress.go) -- several tests below reuse the same fixture
+// content (e.g. long := strings.Repeat("x", ...)) across different
+// expected outcomes, which would otherwise leak a cached decision from
+// one test into another now that decisions are permanent by design.
+func resetCompressionDecisionCache() {
+	compressionDecisionMu.Lock()
+	compressionDecisionCache = make(map[string]string)
+	compressionDecisionMu.Unlock()
+}
+
 func withCompressionEnabled(t *testing.T) {
 	t.Helper()
 	old := promptCompressionEnabled()
 	setPromptCompressionEnabled(true)
-	t.Cleanup(func() { setPromptCompressionEnabled(old) })
+	resetCompressionDecisionCache()
+	t.Cleanup(func() {
+		setPromptCompressionEnabled(old)
+		resetCompressionDecisionCache()
+	})
 }
 
 func TestDefaultCompressionEnabled(t *testing.T) {
@@ -250,6 +265,67 @@ func TestSparsifyContent_PrefersBlocksMatchingQueryKeywords(t *testing.T) {
 	}
 	if strings.Contains(out, "unrelated logging utilities") {
 		t.Fatalf("expected the non-matching block to be dropped in favor of the matching one, got: %s", out)
+	}
+}
+
+// TestCompressMessages_SparsifyStableAcrossTurns is the regression test
+// for the 2026-08-17 fix: an old, sparsified message must keep producing
+// the EXACT SAME bytes on a later "turn" (a later, separate call to
+// compressMessages against a conversation that has grown and whose
+// latest user message -- and therefore queryKeywords -- has changed),
+// or the backend's token-level prefix cache loses everything after that
+// point on every single turn. See the doc comment above
+// compressionDecisionCache in compress.go for the full mechanism.
+func TestCompressMessages_SparsifyStableAcrossTurns(t *testing.T) {
+	withCompressionEnabled(t)
+
+	buildOldToolContent := func() string {
+		var b strings.Builder
+		b.WriteString("sink block\n\n")
+		filler := "irrelevant filler line about nothing in particular. "
+		relevant := "relevant block mentioning authentication login handler.\n\n"
+		for b.Len() < sparseGateChars+10000-len(relevant)-200 {
+			b.WriteString(strings.Repeat(filler, 20))
+			b.WriteString("\n\n")
+		}
+		b.WriteString(relevant)
+		b.WriteString("tail block")
+		return b.String()
+	}
+	oldContent := buildOldToolContent()
+
+	// Turn 1: the current question is about authentication -- sparsify
+	// should keep the "authentication login handler" block.
+	turn1 := append([]map[string]interface{}{msg("system", "sys"), msg("tool", oldContent)},
+		msg("user", "u1"), msg("assistant", "a1"), msg("user", "u2"),
+		msg("assistant", "a2"), msg("user", "u3"),
+		msg("user", "fix the authentication login handler bug"),
+	)
+	out1, saved1 := compressMessages(toInterfaceSlice(turn1))
+	if saved1 <= 0 {
+		t.Fatalf("expected compression to engage on turn 1, saved=%d", saved1)
+	}
+	content1 := out1[1].(map[string]interface{})["content"].(string)
+	if !strings.Contains(content1, "authentication login handler") {
+		t.Fatalf("turn 1: expected the auth block to survive sparsify, got: %s", content1[:min(200, len(content1))])
+	}
+
+	// Turn 2: conversation grew (window slid forward by one more pair),
+	// and the CURRENT question is now about something unrelated -- a
+	// query-driven sparsify would legitimately want to drop the auth
+	// block now, which is exactly what must NOT happen: the old message
+	// was already compressed once, its form must stay frozen.
+	turn2 := append([]map[string]interface{}{msg("system", "sys"), msg("tool", oldContent)},
+		msg("user", "u1"), msg("assistant", "a1"), msg("user", "u2"),
+		msg("assistant", "a2"), msg("user", "u3"), msg("assistant", "a3"),
+		msg("user", "how do I run the database migration script"),
+	)
+	out2, _ := compressMessages(toInterfaceSlice(turn2))
+	content2 := out2[1].(map[string]interface{})["content"].(string)
+
+	if content1 != content2 {
+		t.Fatalf("sparsified content changed between turns -- breaks the backend's prefix cache\nturn1: %s\nturn2: %s",
+			content1[:min(200, len(content1))], content2[:min(200, len(content2))])
 	}
 }
 
