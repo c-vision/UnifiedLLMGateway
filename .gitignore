@@ -13,3 +13,6 @@
 
 # Claude Code workspace metadata
 .claude/
+
+# macOS
+.DS_Store
