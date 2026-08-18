@@ -239,6 +239,7 @@ func onReady() {
 	systray.AddSeparator()
 
 	mReload := systray.AddMenuItem("Reload Settings", "Restart this menu bar to pick up changes to models.json")
+	mClearCaches := systray.AddMenuItem("Clear Disk Caches", "Delete rapid-mlx orphaned KV checkpoints (~/.cache/rapid-mlx/kv_checkpoints) left over from before disk checkpointing was disabled")
 	systray.AddSeparator()
 
 	mQuit := systray.AddMenuItem("Quit Menu Bar", "Quits only this menu bar — services keep running")
@@ -329,6 +330,13 @@ func onReady() {
 				}
 				systray.Quit()
 				return
+			case <-mClearCaches.ClickedCh:
+				bytesFreed, files, err := clearDiskKVCheckpoints()
+				if err != nil {
+					notify("Unified Gateway", fmt.Sprintf("Failed to clear disk caches: %v", err))
+					continue
+				}
+				notify("Unified Gateway", fmt.Sprintf("Cleared %d orphaned KV checkpoint files (%.1f MB)", files, float64(bytesFreed)/(1024*1024)))
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return

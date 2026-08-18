@@ -495,3 +495,55 @@ func notify(title, message string) {
 	script := fmt.Sprintf(`display notification %s with title %s`, appleScriptQuote(message), appleScriptQuote(title))
 	exec.Command("osascript", "-e", script).Run()
 }
+
+// clearDiskKVCheckpoints removes rapid-mlx's disk-backed KV checkpoints
+// (~/.cache/rapid-mlx/kv_checkpoints/). With --kv-disk-checkpoint-interval 0
+// (the gateway's launcher default since 2026-08-18) no NEW checkpoints are
+// written, but ones accumulated before that fix are orphaned on disk forever
+// — rapid-mlx's enforce_disk_cap only runs as a side-effect of writing a new
+// checkpoint, so with writes disabled nothing ever evicts them. The
+// per-request subdirectories (<req_hash>/checkpoint-*.safetensors + .json)
+// are only read at startup via scan_checkpoints, so deleting them while
+// rapid-mlx is running is safe: worst case a future restart finds no
+// checkpoint to resume from. The persisted prefix_cache/ (saved at shutdown,
+// loaded at startup) is deliberately NOT touched — that one is still useful.
+func clearDiskKVCheckpoints() (bytesFreed int64, filesRemoved int, err error) {
+	home, herr := os.UserHomeDir()
+	if herr != nil {
+		return 0, 0, herr
+	}
+	return clearDiskKVCheckpointsAt(filepath.Join(home, ".cache", "rapid-mlx", "kv_checkpoints"))
+}
+
+// clearDiskKVCheckpointsAt is the injectable core of clearDiskKVCheckpoints —
+// factored out so the delete logic is unit-testable against a temp directory
+// instead of the real ~/.cache/rapid-mlx on the developer's machine.
+func clearDiskKVCheckpointsAt(root string) (bytesFreed int64, filesRemoved int, err error) {
+	entries, rerr := os.ReadDir(root)
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return 0, 0, nil
+		}
+		return 0, 0, rerr
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		sub := filepath.Join(root, e.Name())
+		_ = filepath.Walk(sub, func(path string, info os.FileInfo, werr error) error {
+			if werr != nil {
+				return nil
+			}
+			if !info.IsDir() {
+				bytesFreed += info.Size()
+				filesRemoved++
+			}
+			return nil
+		})
+		if derr := os.RemoveAll(sub); derr != nil {
+			return bytesFreed, filesRemoved, derr
+		}
+	}
+	return bytesFreed, filesRemoved, nil
+}
