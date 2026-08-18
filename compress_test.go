@@ -390,3 +390,79 @@ func TestCompressMessages_SparseGateEngagesOnlyAboveSizeThreshold(t *testing.T) 
 		}
 	})
 }
+
+// TestCompressMessages_StrategyFrozenAcrossGateCrossing is the regression
+// test for the WS-C fix (2026-08-18): the sparseGateChars gate is computed
+// from the conversation's TOTAL character count, which grows as the
+// conversation continues. Before the fix, an oversized old message first
+// compressed with plain head+tail truncation (conversation below the gate)
+// would FLIP to sparse-block selection once the conversation crossed the
+// gate -- producing a different byte sequence for the same message and
+// breaking rapid-mlx's content-addressed prefix cache at that position.
+//
+// The fix freezes the whole truncate-vs-sparse strategy per (role, content)
+// via cachedCompressedForm: whichever strategy applied the FIRST time the
+// message was compressed is the one kept forever, even after the global
+// conversation size crosses the sparse gate.
+func TestCompressMessages_StrategyFrozenAcrossGateCrossing(t *testing.T) {
+	withCompressionEnabled(t)
+
+	// One oversized old tool message: large enough to be truncated on its
+	// own (> compressTruncateThreshold), but small enough that a
+	// conversation containing it stays below sparseGateChars on turn 1.
+	// Split into >= sparseMinBlocks (4) blank-line-separated blocks so that
+	// sparse selection CAN actually engage on turn 2 in the buggy pre-fix
+	// code -- with too few blocks, sparsifyContent no-ops and falls back to
+	// plain truncation, which would mask the regression.
+	oldContent := strings.Repeat("irrelevant filler line about nothing in particular. ", 20) + // ~1000 chars
+		"\n\n" + strings.Repeat("another filler block with no keywords at all. ", 20) + // ~1000 chars
+		"\n\n" + strings.Repeat("one more unrelated block of text. ", 20) + // ~1000 chars
+		"\n\n" + strings.Repeat("yet another filler block, still no keywords. ", 20) + // ~1000 chars
+		"\n\n" + strings.Repeat("a fifth unrelated block of plain text. ", 20) + // ~1000 chars
+		"\n\n" + strings.Repeat("sixth and final filler block. ", 20) // ~1000 chars
+
+	// Turn 1: conversation is small, well below sparseGateChars -- the old
+	// message must be compressed with plain head+tail truncation.
+	turn1 := append([]map[string]interface{}{msg("system", "sys"), msg("tool", oldContent)},
+		msg("user", "u1"), msg("assistant", "a1"), msg("user", "u2"),
+		msg("assistant", "a2"), msg("user", "u3"),
+		msg("user", "how do I run the tests"),
+	)
+	if totalContentChars(toInterfaceSlice(turn1)) >= sparseGateChars {
+		t.Fatalf("test setup error: turn 1 conversation must stay below sparseGateChars (%d), got %d",
+			sparseGateChars, totalContentChars(toInterfaceSlice(turn1)))
+	}
+	out1, saved1 := compressMessages(toInterfaceSlice(turn1))
+	if saved1 <= 0 {
+		t.Fatalf("expected turn 1 compression to engage, saved=%d", saved1)
+	}
+	content1 := out1[1].(map[string]interface{})["content"].(string)
+	if strings.Contains(content1, "blocchi meno rilevanti omessi") {
+		t.Fatalf("turn 1 (below gate): expected plain truncation, got sparse-style output: %.200s", content1)
+	}
+
+	// Turn 2: the same old message, but the conversation has grown with a
+	// huge unrelated tool output that pushes the TOTAL past sparseGateChars.
+	// The gate now says "sparse", but the old message was already frozen as
+	// truncation on turn 1 -- its bytes must NOT change.
+	huge := strings.Repeat("large padding to cross the sparse gate threshold easily. ", 4000) // ~140k chars
+	turn2 := append([]map[string]interface{}{msg("system", "sys"), msg("tool", oldContent)},
+		msg("user", "u1"), msg("assistant", "a1"), msg("user", "u2"),
+		msg("assistant", "a2"), msg("user", "u3"), msg("assistant", "a3"),
+		msg("user", "leggi il file enorme"), msg("tool", huge), msg("user", "grazie"),
+	)
+	if totalContentChars(toInterfaceSlice(turn2)) < sparseGateChars {
+		t.Fatalf("test setup error: turn 2 conversation must exceed sparseGateChars (%d), got %d",
+			sparseGateChars, totalContentChars(toInterfaceSlice(turn2)))
+	}
+	out2, saved2 := compressMessages(toInterfaceSlice(turn2))
+	if saved2 <= 0 {
+		t.Fatalf("expected turn 2 compression to engage, saved=%d", saved2)
+	}
+	content2 := out2[1].(map[string]interface{})["content"].(string)
+
+	if content1 != content2 {
+		t.Fatalf("compressed form changed when the conversation crossed the sparse gate -- breaks the backend's prefix cache\n"+
+			"turn1 (below gate): %.200s\nturn2 (above gate): %.200s", content1, content2)
+	}
+}

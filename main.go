@@ -720,6 +720,10 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 		})
 		return
 	}
+	if path == "/v1/sessions" {
+		c.JSON(200, sessionTrack.stats())
+		return
+	}
 
 	var bodyBytes []byte
 	if c.Request.Body != nil {
@@ -753,6 +757,17 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 					compressionStats.requestsCompressed.Add(1)
 					compressionStats.charsSaved.Add(int64(saved))
 					log.Printf("🗜️  prompt compression saved ~%d chars", saved)
+				}
+				// WS-A session tracking (2026-08-18): measure the POST-
+				// compression byte stream, i.e. exactly what gets forwarded
+				// to rapid-mlx. A session break here predicts a prefix-cache
+				// miss there. Log it loudly so a /compact or an edited old
+				// message (the things that legitimately break continuity) are
+				// distinguishable from our own compression introducing breaks.
+				if compressedMsgs, ok := payload["messages"].([]interface{}); ok {
+					if _, _, broke := sessionTrack.trackSession(originalModel, compressedMsgs); broke {
+						log.Printf("🔴 session break detected (model=%q) -- prefix cache for this conversation will miss on the changed segment", originalModel)
+					}
 				}
 			}
 			// gpt-oss's harmony reasoning format has no launch-time "keep it

@@ -450,6 +450,18 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cm
 		turboQuant = "v4"
 	}
 	args = append(args, "--kv-cache-turboquant", turboQuant)
+	// Disk-backed KV checkpointing (R15 #296) DISABLED: rapid-mlx snapshots
+	// the whole KV state to ~/.cache/rapid-mlx/kv_checkpoints/ every
+	// --kv-disk-checkpoint-interval (default 256) tokens, and each snapshot
+	// is the full live KV (~5 GiB at 76k tokens, measured 2026-08-18). With
+	// loads=0 for the entire process lifetime (the load path only runs at
+	// startup via scan_checkpoints, and a restart reloads from the in-memory
+	// prefix-cache save instead), these writes are pure I/O churn on the
+	// generation hot path: 191 writes + 194 disk-cap evictions in one
+	// session, ~20 GiB written for zero reuse. Disabling it removes that
+	// cost entirely; if disk persistence across restarts is ever needed it
+	// can be re-enabled for the specific workload that needs it.
+	args = append(args, "--kv-disk-checkpoint-interval", "0")
 	// PFlash OFF by default: rapid-mlx's own metrics.py documents that
 	// "when PFlash compression engages, the prompt skips the prefix-cache
 	// fetch + store paths entirely" -- and qw3627/qw27/etc are

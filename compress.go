@@ -197,11 +197,27 @@ func compressionDecisionCacheSize() int {
 	return len(compressionDecisionCache)
 }
 
-// cachedSparsify returns sparsifyContent's result for (role, content),
-// computing it only the first time this exact pair is seen and reusing
-// that block selection on every later call -- see the doc comment above.
-// ok mirrors sparsifyContent's own "dropped > 0" signal.
-func cachedSparsify(role, content string, keywords map[string]bool) (result string, ok bool) {
+// cachedCompressedForm returns the frozen compressed form for (role, content)
+// -- the whole truncate-vs-sparse decision, not just the sparse step.
+// Computing it only the first time this exact pair is seen and reusing that
+// byte sequence on every later call is what keeps rapid-mlx's prefix cache
+// intact, but the STRATEGY must be frozen too, not just the sparse output:
+//
+//   - sparseGated (compressMessages) is computed from totalContentChars(messages),
+//     which GROWS as the conversation continues. If an oversized old message was
+//     first compressed with plain head+tail truncation while the conversation
+//     was still below sparseGateChars, and then the conversation crosses the
+//     gate, the sparse branch would kick in and produce a DIFFERENT byte
+//     sequence for the SAME message -- breaking the backend's content-addressed
+//     prefix cache at exactly that position for every later turn. Freezing the
+//     whole decision (including which strategy) makes the serialized prefix
+//     stable-or-growing instead.
+//
+// Plain head+tail truncation is itself a pure function of the message's own
+// content (so it needs no cache for stability); what IS cached here is the
+// strategy choice, so a message never flips from truncated to sparse (or back)
+// as the global conversation size crosses the sparse gate.
+func cachedCompressedForm(role, content string, sparseGated bool, keywords map[string]bool) (result string, ok bool) {
 	key := compressionCacheKey(role, content)
 
 	compressionDecisionMu.Lock()
@@ -211,24 +227,40 @@ func cachedSparsify(role, content string, keywords map[string]bool) (result stri
 		return cached, true
 	}
 
-	sparsified, dropped := sparsifyContent(content, keywords, sparseKeepRatio)
-	if dropped <= 0 {
-		return "", false
+	var form string
+	if sparseGated {
+		if sparsified, dropped := sparsifyContent(content, keywords, sparseKeepRatio); dropped > 0 {
+			form = sparsified
+		}
+	}
+	if form == "" {
+		// Below the sparse gate, or content with too few blocks to sparsify
+		// usefully -- plain head+tail truncation. Also frozen, so a later
+		// gate-crossing can't re-compress this message a different way.
+		omitted := len(content) - compressHeadKeepChars - compressTailKeepChars
+		form = content[:compressHeadKeepChars] +
+			fmt.Sprintf("\n\n[...%d caratteri omessi...]\n\n", omitted) +
+			content[len(content)-compressTailKeepChars:]
 	}
 
 	compressionDecisionMu.Lock()
 	if len(compressionDecisionCache) < compressionDecisionCacheCap {
-		compressionDecisionCache[key] = sparsified
+		compressionDecisionCache[key] = form
 	}
 	compressionDecisionMu.Unlock()
-	return sparsified, true
+	return form, true
 }
 
 // computeCompressedContent applies the per-message compression rules
 // (tool-result dedup/near-dup, then sparse-block selection or head+tail
-// truncation) to a single message. Only the sparsify step is cached (see
-// cachedSparsify) -- dedup and truncation are recomputed fresh every call,
-// deliberately (see doc comment above).
+// truncation) to a single message. The truncate-vs-sparse choice for
+// oversized content is frozen per (role, content) via cachedCompressedForm
+// (see its doc comment for why the strategy itself must be cached, not just
+// the sparse output). Dedup placeholders are recomputed fresh every call,
+// deliberately: they are already pure functions of the message's own content
+// (the exact/near-dup hash + that content's length), so for an append-only
+// conversation they can only ever flip from "not yet a duplicate" to
+// "duplicate", never back -- recomputing them fresh is already stable.
 func computeCompressedContent(i int, role, content string, lastIndexOf, lastShapeIndexOf map[string]int, sparseGated bool, keywords map[string]bool) (string, bool) {
 	if role == "tool" && len(content) >= compressDedupMinChars {
 		if lastIdx, dup := lastIndexOf[contentSignature(content)]; dup && lastIdx != i {
@@ -252,18 +284,7 @@ func computeCompressedContent(i int, role, content string, lastIndexOf, lastShap
 	}
 
 	if len(content) > compressTruncateThreshold {
-		if sparseGated {
-			if sparsified, ok := cachedSparsify(role, content, keywords); ok {
-				return sparsified, true
-			}
-			// Too few blocks to sparsify usefully -- fall through to plain
-			// head+tail truncation below instead.
-		}
-		omitted := len(content) - compressHeadKeepChars - compressTailKeepChars
-		truncated := content[:compressHeadKeepChars] +
-			fmt.Sprintf("\n\n[...%d caratteri omessi...]\n\n", omitted) +
-			content[len(content)-compressTailKeepChars:]
-		return truncated, true
+		return cachedCompressedForm(role, content, sparseGated, keywords)
 	}
 
 	return content, false
