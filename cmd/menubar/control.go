@@ -39,6 +39,7 @@ type gwConfig struct {
 	OllamaPort       int                    `json:"ollama_port"`
 	MediaBackendPort int                    `json:"media_backend_port,omitempty"`
 	FluxBackendPort  int                    `json:"flux_backend_port,omitempty"`
+	SmallBackendPort int                    `json:"small_backend_port,omitempty"`
 	Models           map[string]modelConfig `json:"models"`
 }
 
@@ -94,6 +95,9 @@ func loadGWConfig() (*gwConfig, error) {
 	}
 	if cfg.FluxBackendPort == 0 {
 		cfg.FluxBackendPort = cfg.MediaBackendPort + 1
+	}
+	if cfg.SmallBackendPort == 0 {
+		cfg.SmallBackendPort = cfg.FluxBackendPort + 1
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)

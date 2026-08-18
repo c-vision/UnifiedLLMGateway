@@ -155,8 +155,8 @@ func checkMemoryPressure(totalGB float64) {
 }
 
 // restartActiveBackends force-restarts whatever model is currently active
-// on each gateway-spawned pool (chat, OCR, FLUX), one at a time -- Ollama
-// is deliberately skipped, see the package doc comment above. Each
+// on each gateway-spawned pool (chat, OCR, FLUX, small), one at a time --
+// Ollama is deliberately skipped, see the package doc comment above. Each
 // restart goes through loadModel (the same cross-process-locked entry
 // point `unified-gateway load` uses), so it can't race a concurrent
 // user-triggered load, and reuses the exact same memory-safety check
@@ -166,7 +166,7 @@ func checkMemoryPressure(totalGB float64) {
 // weights the check estimates as "required").
 func restartActiveBackends(cfg *Config) []string {
 	var restarted []string
-	for _, port := range []int{cfg.BackendPort, cfg.MediaBackendPort, cfg.FluxBackendPort} {
+	for _, port := range []int{cfg.BackendPort, cfg.MediaBackendPort, cfg.FluxBackendPort, cfg.SmallBackendPort} {
 		name := runningBackendModel(cfg, port)
 		if name == "" {
 			continue

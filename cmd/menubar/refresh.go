@@ -36,7 +36,11 @@ type refreshRefs struct {
 	mFlux         *systray.MenuItem // nil if no "backend":"mflux" entries configured
 	mStartFlux    *systray.MenuItem // permanently disabled by addStartItem if fluxDefault == ""
 	mStopFlux     *systray.MenuItem
-	fluxDefault   string // model Start FLUX loads; "" if none configured
+	fluxDefault   string            // model Start FLUX loads; "" if none configured
+	mSmall        *systray.MenuItem // nil if no "kind":"small" entries configured
+	mStartSmall   *systray.MenuItem // permanently disabled by addStartItem if smallDefault == ""
+	mStopSmall    *systray.MenuItem
+	smallDefault  string // model Start Small loads; "" if none configured
 }
 
 // setEnabled is a small helper since MenuItem only exposes Enable/Disable,
@@ -188,6 +192,33 @@ func refreshLoop(r refreshRefs) {
 				setEnabled(r.mStartFlux, !fluxActive)
 			}
 			setEnabled(r.mStopFlux, fluxActive)
+		}
+
+		// "small" models (opencode's small_model, etc.) are their own POOL
+		// on cfg.SmallBackendPort -- same live-detection pattern as the
+		// media pools above, but sized so a cheap secondary model stays
+		// resident without ever killing the main chat model.
+		var smallModel string
+		var smallActive bool
+		if r.cfg != nil && r.mSmall != nil {
+			smallModel, smallActive = runningMLXModel(r.cfg.SmallBackendPort)
+			if !smallActive {
+				if m, active := runningDS4Model(r.cfg, r.cfg.SmallBackendPort); active {
+					smallModel, smallActive = m, true
+				}
+			}
+			switch {
+			case smallActive && smallModel != "":
+				r.mSmall.SetTitle(fmt.Sprintf("🟢 Small %s (port %d)", smallModel, r.cfg.SmallBackendPort))
+			case smallActive:
+				r.mSmall.SetTitle(fmt.Sprintf("🟢 Small (port %d)", r.cfg.SmallBackendPort))
+			default:
+				r.mSmall.SetTitle("🔴 Small Models")
+			}
+			if r.smallDefault != "" {
+				setEnabled(r.mStartSmall, !smallActive)
+			}
+			setEnabled(r.mStopSmall, smallActive)
 		}
 
 		ollamaPort := 11434

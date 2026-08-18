@@ -137,20 +137,27 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 
 	backend := g.resolveBackend()
 
-	// Media-kind models route to their own pool's shared port -- see the
-	// matching block in handleOpenAIProxy for why (loading/switching one
-	// must never touch the chat backend resolved above).
+	// Media-kind models and "small" models route to their own pool's
+	// shared port -- see the matching block in handleOpenAIProxy for why
+	// (loading/switching one must never touch the chat backend resolved
+	// above).
 	if cfg, err := loadConfig(); err == nil && req.Model != "" {
-		if mc, ok := cfg.Models[req.Model]; ok && mc.Kind == "media" {
-			if !isMediaModelActive(cfg, req.Model) {
+		if mc, ok := cfg.Models[req.Model]; ok && (mc.Kind == "media" || mc.Kind == "small") {
+			active := false
+			if mc.Kind == "media" {
+				active = isMediaModelActive(cfg, req.Model)
+			} else {
+				active = isSmallModelActive(cfg, req.Model)
+			}
+			if !active {
 				if ensureBackendLoading(req.Model) {
-					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q is not active yet -- load triggered, retry shortly", req.Model)})
+					c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active yet -- load triggered, retry shortly", req.Model)})
 				} else {
-					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q crashed repeatedly right after loading -- not retrying automatically, check gateway logs and restart manually", req.Model)})
+					c.JSON(503, gin.H{"error": fmt.Sprintf("model %q crashed repeatedly right after loading -- not retrying automatically, check gateway logs and restart manually", req.Model)})
 				}
 				return
 			}
-			backend = activeBackend{Port: mediaPoolPort(cfg, mc), Model: req.Model}
+			backend = activeBackend{Port: modelPoolPort(cfg, mc), Model: req.Model}
 		}
 	}
 
@@ -594,9 +601,15 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 		// chat choice; opencode/pi/Claude Code all read this endpoint (or
 		// the same models.json) to populate a model picker, and a "read
 		// this image" model mixed into that list is just noise/confusion.
-		// Use GET /v1/media-models for those instead.
+		// Use GET /v1/media-models for those instead. "small" entries stay
+		// in the catalog (some clients select them as a secondary model),
+		// but their "active" flag is answered against their own pool.
 		if m.Kind == "media" {
 			continue
+		}
+		isActive := name == active.Model
+		if m.Kind == "small" {
+			isActive = isSmallModelActive(cfg, name)
 		}
 		data = append(data, gin.H{
 			"id":         name,
@@ -606,7 +619,7 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 			"label":      m.Label,
 			"backend":    m.Backend,
 			"has_vision": m.HasVision,
-			"active":     name == active.Model,
+			"active":     isActive,
 		})
 	}
 	c.JSON(200, gin.H{"object": "list", "data": data})
@@ -802,21 +815,31 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 
 	// Media-kind models (OCR, each FLUX model, etc.) route to their own
 	// pool's shared port and never touch the chat backend resolved above
-	// -- see isMediaModelActive/mediaPoolPort and loadModelLocked's Kind
-	// branch in models.go. A request naming one of these completely
-	// bypasses the chat-mismatch self-heal below; it gets its own copy of
-	// the same self-heal, just against that model's pool instead.
+	// -- see isMediaModelActive/modelPoolPort and loadModelLocked's Kind
+	// branch in models.go. "small" models (the cheap secondary model some
+	// clients use for titles/summaries, e.g. opencode's small_model) get
+	// the same treatment against their own dedicated pool, so a request
+	// naming them never kills the main chat model. A request naming one of
+	// these completely bypasses the chat-mismatch self-heal below; it gets
+	// its own copy of the same self-heal, just against that model's pool
+	// instead.
 	if cfg, err := loadConfig(); err == nil && originalModel != "" {
-		if mc, ok := cfg.Models[originalModel]; ok && mc.Kind == "media" {
-			if !isMediaModelActive(cfg, originalModel) {
+		if mc, ok := cfg.Models[originalModel]; ok && (mc.Kind == "media" || mc.Kind == "small") {
+			active := false
+			if mc.Kind == "media" {
+				active = isMediaModelActive(cfg, originalModel)
+			} else {
+				active = isSmallModelActive(cfg, originalModel)
+			}
+			if !active {
 				if ensureBackendLoading(originalModel) {
-					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q is not active yet -- load triggered, retry shortly", originalModel)})
+					c.JSON(503, gin.H{"error": fmt.Sprintf("model %q is not active yet -- load triggered, retry shortly", originalModel)})
 				} else {
-					c.JSON(503, gin.H{"error": fmt.Sprintf("media model %q crashed repeatedly right after loading -- not retrying automatically, check gateway logs and restart manually", originalModel)})
+					c.JSON(503, gin.H{"error": fmt.Sprintf("model %q crashed repeatedly right after loading -- not retrying automatically, check gateway logs and restart manually", originalModel)})
 				}
 				return
 			}
-			backend = activeBackend{Port: mediaPoolPort(cfg, mc), Model: originalModel}
+			backend = activeBackend{Port: modelPoolPort(cfg, mc), Model: originalModel}
 		}
 	}
 

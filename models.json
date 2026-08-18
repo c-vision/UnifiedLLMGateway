@@ -5,6 +5,7 @@
   "ds4_dir": "~/ds4",
   "media_backend_port": 11436,
   "flux_backend_port": 11437,
+  "small_backend_port": 11438,
   "mflux_venv_dir": "~/ai/env-mflux",
   "flux_server_script": "~/ai/flux-server/server.py",
   "stall_watchdog_threshold_seconds": 1200,
@@ -129,6 +130,7 @@
       "has_vision": false,
       "ctx": 32768,
       "quant_bits": 2,
+      "kind": "small",
       "tool_call_parser": "hermes"
     },
     "qw3codernext": {

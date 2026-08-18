@@ -140,7 +140,8 @@ func onReady() {
 	var mMLX, mDS4, mStartMLX, mStartDS4, mStopMLX, mStopDS4 *systray.MenuItem
 	var mOCR, mStartOCR, mStopOCR *systray.MenuItem
 	var mFlux, mStartFlux, mStopFlux *systray.MenuItem
-	var mlxDefault, ds4Default, ocrDefault, fluxDefault string
+	var mSmall, mStartSmall, mStopSmall *systray.MenuItem
+	var mlxDefault, ds4Default, ocrDefault, fluxDefault, smallDefault string
 
 	if cfgErr != nil {
 		mMissing := systray.AddMenuItem("Backends unavailable (models.json not found)", "")
@@ -149,12 +150,13 @@ func onReady() {
 		// Media-kind entries split into two POOLS, not lumped together --
 		// OCR-like ones (any backend except "mflux") share
 		// cfg.MediaBackendPort, FLUX-family ones (backend "mflux") share
-		// cfg.FluxBackendPort. Each pool behaves exactly like rapid-mlx/ds4
-		// above: one shared Start/Stop, exclusive switching within the
-		// pool (loading flux2-klein-4b kills flux1-dev if it was running,
-		// same as loading a different chat model kills the previous one)
-		// -- but the two pools and the chat pool never touch each other.
-		var mlxNames, ds4Names, ocrNames, fluxNames []string
+		// cfg.FluxBackendPort. "small" entries get their own dedicated
+		// pool on cfg.SmallBackendPort. Each pool behaves exactly like
+		// rapid-mlx/ds4 above: one shared Start/Stop, exclusive switching
+		// within the pool (loading flux2-klein-4b kills flux1-dev if it
+		// was running, same as loading a different chat model kills the
+		// previous one) -- but the pools never touch each other.
+		var mlxNames, ds4Names, ocrNames, fluxNames, smallNames []string
 		for n, m := range cfg.Models {
 			if m.Kind == "media" {
 				if m.Backend == "mflux" {
@@ -162,6 +164,10 @@ func onReady() {
 				} else {
 					ocrNames = append(ocrNames, n)
 				}
+				continue
+			}
+			if m.Kind == "small" {
+				smallNames = append(smallNames, n)
 				continue
 			}
 			switch m.Backend {
@@ -175,6 +181,7 @@ func onReady() {
 		sort.Strings(ds4Names)
 		sort.Strings(ocrNames)
 		sort.Strings(fluxNames)
+		sort.Strings(smallNames)
 
 		if len(mlxNames) > 0 {
 			mlxDefault = mlxNames[0]
@@ -187,6 +194,9 @@ func onReady() {
 		}
 		if len(fluxNames) > 0 {
 			fluxDefault = fluxNames[0]
+		}
+		if len(smallNames) > 0 {
+			smallDefault = smallNames[0]
 		}
 
 		mMLX = systray.AddMenuItem("rapid-mlx", "")
@@ -213,6 +223,12 @@ func onReady() {
 			mStartFlux = addStartItem(mFlux, "Start FLUX", fluxDefault, cfg.FluxBackendPort)
 			mStopFlux = mFlux.AddSubMenuItem("Stop FLUX", fmt.Sprintf("Stop the backend on port %d", cfg.FluxBackendPort))
 			addModelItems(mFlux, cfg, fluxNames, modelItems)
+		}
+		if len(smallNames) > 0 {
+			mSmall = systray.AddMenuItem("Small Models", "Cheap secondary models (e.g. opencode's small_model for conversation titles) -- own pool, own port, never kills the main chat model")
+			mStartSmall = addStartItem(mSmall, "Start Small", smallDefault, cfg.SmallBackendPort)
+			mStopSmall = mSmall.AddSubMenuItem("Stop Small", fmt.Sprintf("Stop the backend on port %d", cfg.SmallBackendPort))
+			addModelItems(mSmall, cfg, smallNames, modelItems)
 		}
 	}
 	systray.AddSeparator()
@@ -271,6 +287,10 @@ func onReady() {
 		mStartFlux:    mStartFlux,
 		mStopFlux:     mStopFlux,
 		fluxDefault:   fluxDefault,
+		mSmall:        mSmall,
+		mStartSmall:   mStartSmall,
+		mStopSmall:    mStopSmall,
+		smallDefault:  smallDefault,
 	})
 
 	ollamaPort := 11434
@@ -293,6 +313,8 @@ func onReady() {
 				killPort(cfg.MediaBackendPort)
 			case <-clickedOrNil(mStopFlux):
 				killPort(cfg.FluxBackendPort)
+			case <-clickedOrNil(mStopSmall):
+				killPort(cfg.SmallBackendPort)
 			case <-mOllamaStart.ClickedCh:
 				go func() {
 					if confirmPortFree(ollamaPort, "Ollama") {
@@ -309,6 +331,7 @@ func onReady() {
 				stopBackend(cfg)
 				stopAllMediaBackends(cfg)
 				stopOllama()
+				killPort(cfg.SmallBackendPort)
 			case <-mCompression.ClickedCh:
 				state, ok := getCompressionState()
 				if !ok {

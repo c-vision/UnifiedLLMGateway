@@ -76,6 +76,7 @@ type Config struct {
 	OllamaPort                     int                    `json:"ollama_port,omitempty"`
 	MediaBackendPort               int                    `json:"media_backend_port,omitempty"`
 	FluxBackendPort                int                    `json:"flux_backend_port,omitempty"`
+	SmallBackendPort               int                    `json:"small_backend_port,omitempty"`
 	VenvDir                        string                 `json:"venv_dir"`
 	DS4Dir                         string                 `json:"ds4_dir"`
 	MfluxVenvDir                   string                 `json:"mflux_venv_dir,omitempty"`
@@ -124,6 +125,9 @@ func loadConfig() (*Config, error) {
 	if cfg.FluxBackendPort == 0 {
 		cfg.FluxBackendPort = cfg.MediaBackendPort + 1
 	}
+	if cfg.SmallBackendPort == 0 {
+		cfg.SmallBackendPort = cfg.FluxBackendPort + 1
+	}
 	// 0 (absent from models.json) means "use the default, watchdog on."
 	// A negative value is the explicit opt-out (free% can never go
 	// negative, so the check in checkMemoryPressure never fires).
@@ -143,17 +147,35 @@ func loadConfig() (*Config, error) {
 	return &cfg, nil
 }
 
-// mediaPoolPort returns which shared port a "kind":"media" entry belongs
-// to: FLUX-family models (backend "mflux") share Config.FluxBackendPort,
-// every other media-kind model (OCR, etc.) shares Config.MediaBackendPort.
-// Both are genuine pools, not per-model ports -- loading one entry within
-// a pool is exclusive within that pool, exactly like the chat pool, but
-// the two media pools and the chat pool never affect each other.
-func mediaPoolPort(cfg *Config, m ModelConfig) int {
-	if m.Backend == "mflux" {
-		return cfg.FluxBackendPort
+// modelPoolPort returns which shared port an entry belongs to, by kind:
+//   - chat (Kind empty): Config.BackendPort
+//   - "media" + backend "mflux": Config.FluxBackendPort
+//   - "media" (OCR-like): Config.MediaBackendPort
+//   - "small": Config.SmallBackendPort
+//
+// All are genuine pools, not per-model ports -- loading one entry within a
+// pool is exclusive within that pool, exactly like the chat pool, but the
+// pools never affect each other. The "small" pool exists so a cheap
+// secondary model (e.g. opencode's small_model for conversation titles)
+// stays resident on its own port without killing the main chat model on
+// every request that names it.
+func modelPoolPort(cfg *Config, m ModelConfig) int {
+	if m.Kind == "media" {
+		if m.Backend == "mflux" {
+			return cfg.FluxBackendPort
+		}
+		return cfg.MediaBackendPort
 	}
-	return cfg.MediaBackendPort
+	if m.Kind == "small" {
+		return cfg.SmallBackendPort
+	}
+	return cfg.BackendPort
+}
+
+// mediaPoolPort is kept as a thin alias for call sites that semantically
+// mean "a media-kind pool port" -- see modelPoolPort for the general case.
+func mediaPoolPort(cfg *Config, m ModelConfig) int {
+	return modelPoolPort(cfg, m)
 }
 
 // ============================================================================
@@ -332,6 +354,21 @@ func isMediaModelActive(cfg *Config, shortName string) bool {
 		return false
 	}
 	return resolveActiveMediaPool(cfg, mediaPoolPort(cfg, m)).Model == shortName
+}
+
+// isSmallModelActive reports whether shortName (a "kind":"small" entry) is
+// specifically the one active on the small pool's shared port right now --
+// the same live introspection media models use, just against
+// Config.SmallBackendPort.
+func isSmallModelActive(cfg *Config, shortName string) bool {
+	if cfg == nil {
+		return false
+	}
+	m, ok := cfg.Models[shortName]
+	if !ok || m.Kind != "small" {
+		return false
+	}
+	return resolveActiveMediaPool(cfg, cfg.SmallBackendPort).Model == shortName
 }
 
 // warmOllamaModel triggers Ollama to load the model into memory now, via its
@@ -820,18 +857,18 @@ func loadModelLocked(shortName string) error {
 		}
 	} else {
 		// Media-kind models share one of two POOLS (OCR-like on
-		// MediaBackendPort, FLUX-family on FluxBackendPort) -- switching
-		// within a pool is exclusive, exactly like the chat pool, but
-		// loading/switching a media model never touches the chat backend
-		// or the OTHER media pool. This is the same non-exclusive
-		// relationship Ollama already has with the chat backend, just
-		// generalized to two independent pools instead of one daemon. The
-		// memory check below only ever credits/kills whatever was
-		// previously on THIS pool's port, never the chat backend's or the
-		// other pool's.
+		// MediaBackendPort, FLUX-family on FluxBackendPort) and "small"
+		// models a third (SmallBackendPort) -- switching within a pool is
+		// exclusive, exactly like the chat pool, but loading/switching a
+		// pooled model never touches the chat backend or the OTHER pools.
+		// This is the same non-exclusive relationship Ollama already has
+		// with the chat backend, just generalized to independent pools
+		// instead of one daemon. The memory check below only ever
+		// credits/kills whatever was previously on THIS pool's port, never
+		// the chat backend's or another pool's.
 		port := cfg.BackendPort
-		if m.Kind == "media" {
-			port = mediaPoolPort(cfg, m)
+		if m.Kind == "media" || m.Kind == "small" {
+			port = modelPoolPort(cfg, m)
 		}
 
 		if required := estimateModelSizeGB(m); required > 0 {
