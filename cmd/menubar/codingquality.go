@@ -12,8 +12,6 @@ package main
 var codingQualityIcon = map[string]string{
 	// Coding-specialized MoE, modern training, strong agentic/tool-call
 	// track record in this catalog's own testing.
-	"qw3coder":     "🟢",
-	"qw3coder6bit": "🟢",
 	"qw3coder8bit": "🟢",
 	"glm45air":     "🟢",
 
@@ -22,9 +20,14 @@ var codingQualityIcon = map[string]string{
 	// unusual/very recent language features.
 	"qw3627":   "🟡",
 	"qw3635":   "🟡",
-	"qw27":     "🟡",
 	"qw27opus": "🟡",
 	"qw122":    "🟡",
+
+	// qw38 (2026-08-15): official Qwen/Qwen3.8-27B, dense + vision,
+	// same "qwen3_5" lineage as qw27/qw3627/qw27opus above -- replaces
+	// qw27 (removed) as the vision-capable general model in this tier.
+	// Untested in this catalog's own real agentic use yet.
+	"qw38": "🟡",
 
 	// Promising on paper, unverified in this catalog's own real-world
 	// agentic use yet: gptoss20 reportedly beats its own 120B sibling on
@@ -35,19 +38,13 @@ var codingQualityIcon = map[string]string{
 	// this gap). Bump to 🟢 once actually exercised.
 	"gptoss20": "🟡",
 
-	// Untested additions (2026-07-15). glm47flash is an official zai-org
-	// release in the same lineage as glm45air (🟢) -- same reasoning/tool
-	// format, far fewer active experts (4 routed + 1 shared of 65 vs
-	// glm45air's 12B active), so plausibly a fast option for the same
-	// large-C#-project use case where glm45air was too slow -- but
-	// unverified until actually run. bonsai4b is a 4B dense model at
-	// extreme ternary (~2-bit) quantization from a research lab (Prism
-	// ML): tiny and fast by construction, but this catalog's own findings
-	// this session are that small dense models struggle on large real C#
-	// work, and 2-bit is far more aggressive than any other quant in this
-	// catalog -- treat with at least as much caution as gptoss20 got.
-	"glm47flash": "🟡",
-	"bonsai4b":   "🟡",
+	// bonsai4b is a 4B dense model at extreme ternary (~2-bit)
+	// quantization from a research lab (Prism ML): tiny and fast by
+	// construction, but this catalog's own findings this session are that
+	// small dense models struggle on large real C# work, and 2-bit is far
+	// more aggressive than any other quant in this catalog -- treat with
+	// at least as much caution as gptoss20 got.
+	"bonsai4b": "🟡",
 
 	// qw3codernext (2026-07-15, still downloading when added): official
 	// Qwen-Coder branding, same family as qw3coder/qw3coder6bit/8bit (🟢

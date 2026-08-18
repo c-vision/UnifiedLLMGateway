@@ -7,6 +7,7 @@
   "flux_backend_port": 11437,
   "mflux_venv_dir": "~/ai/env-mflux",
   "flux_server_script": "~/ai/flux-server/server.py",
+  "stall_watchdog_threshold_seconds": 1200,
   "models": {
     "antirez": {
       "path": "~/ds4/ds4flash.gguf",
@@ -22,14 +23,14 @@
       "has_vision": true,
       "ctx": 262144
     },
-    "qw27": {
-      "path": "~/ai/Models/Qwen3.5-27B-4bit",
-      "label": "Qwen3.5-27B (4-bit)",
+    "qw38": {
+      "path": "~/ai/Models/Qwen3.8-27B-8bit",
+      "label": "Qwen3.8-27B (8-bit, vision)",
       "backend": "mlx",
       "model_type": "qwen3_5",
       "has_vision": true,
       "ctx": 262144,
-      "quant_bits": 4
+      "quant_bits": 8
     },
     "qw3627": {
       "path": "~/ai/Models/Qwen3.6-27B-4bit",
@@ -45,24 +46,6 @@
       "label": "Qwen3.6-35B-A3B (MoE, 4-bit OptiQ, text-only)",
       "backend": "mlx",
       "model_type": "qwen3_5",
-      "has_vision": false,
-      "ctx": 262144,
-      "quant_bits": 4
-    },
-    "qw3coder6bit": {
-      "path": "~/ai/Models/Qwen3-Coder-30B-A3B-Instruct-6bit",
-      "label": "Qwen3-Coder-30B-A3B (MoE, official, 6-bit)",
-      "backend": "mlx",
-      "model_type": "qwen3_moe",
-      "has_vision": false,
-      "ctx": 262144,
-      "quant_bits": 6
-    },
-    "qw3coder": {
-      "path": "~/ai/Models/Qwen3-Coder-30B-A3B-Instruct-4bit",
-      "label": "Qwen3-Coder-30B-A3B (MoE, official, 4-bit)",
-      "backend": "mlx",
-      "model_type": "qwen3_moe",
       "has_vision": false,
       "ctx": 262144,
       "quant_bits": 4
@@ -147,15 +130,6 @@
       "ctx": 32768,
       "quant_bits": 2,
       "tool_call_parser": "hermes"
-    },
-    "glm47flash": {
-      "path": "~/ai/Models/GLM-4.7-Flash-8bit",
-      "label": "GLM-4.7-Flash (MoE, 4/64+1 shared experts, 8-bit)",
-      "backend": "mlx",
-      "model_type": "glm4_moe_lite",
-      "has_vision": false,
-      "ctx": 202752,
-      "quant_bits": 8
     },
     "qw3codernext": {
       "path": "~/ai/Models/Qwen3-Coder-Next-mxfp4-mlx",

@@ -24,7 +24,9 @@ Unified Gateway does that translation, and adds model lifecycle management on to
 - **No port collisions, by design** — the gateway's own adapters, the model backend, and third-party tools (e.g. `ollama`) are always kept on distinct, non-overlapping ports
 - **Optional background service** — install as a macOS `launchd` agent that starts at login and restarts on crash
 - **Optional menu bar controller** — a small native tray app to start/stop the gateway, the model backend, and Ollama, and switch models, without a terminal
-- **Live-toggleable prompt compression** — shrinks stale, duplicated, or oversized content in older messages before it ever reaches the backend, cutting both prefill time and KV-cache pressure on long-running sessions; on by default, no restart needed to flip it
+- **Live-toggleable prompt compression** — shrinks stale, duplicated, or oversized content in older messages before it ever reaches the backend, cutting both prefill time and KV-cache pressure on long-running sessions; on by default, no restart needed to flip it. Every per-message compression decision is frozen, so the bytes sent to the backend stay stable turn after turn and its content-addressed prefix cache keeps working (see [Prompt compression](#prompt-compression))
+- **Session tracking** — per-conversation continuity detection exposed at `GET /v1/sessions`, so a history edit or compaction is visible as a session break that predicts a backend prefix-cache miss (see [Session tracking](#session-tracking))
+- **KV checkpoint lifecycle management** — rapid-mlx's disk-backed KV checkpoints are disabled (pure I/O churn on the generation path) and any stale snapshots are cleared automatically on model switch and manually via the menu bar's **Clear Disk Caches** item (see [KV checkpoint lifecycle](#kv-checkpoint-lifecycle))
 
 ## Architecture
 
@@ -240,6 +242,10 @@ Motivated by a real OpenCode session that reached 41,180 prompt tokens almost en
 
 Both mechanisms are covered by `compress_test.go`; `compress_eval_test.go` and `compress_eval_sparse_test.go` are throwaway (not regression) evaluations that print before/after sizes on realistic conversation shapes — run with e.g. `go test -run TestCompressionEval_SparseAndNearDup -v`.
 
+**Compression decisions are frozen per message (2026-08-18).** `cachedCompressedForm` keys the whole truncate-vs-sparse decision on the message's own `(role, content)` and reuses the exact byte sequence on every later turn. This is what keeps rapid-mlx's content-addressed prefix cache intact: rapid-mlx has no session id to key on, so it can only recognize a previously-seen prefix by exact token match — any change to an old message's serialized bytes forces a near-full re-prefill on every later turn. Two subtleties this guards against:
+- The sparse gate (`sparseGateChars`, ~150k conversation chars) is computed on the conversation's *total* size, which grows — before the fix, an old message first truncated below the gate would flip to sparse-block selection once the conversation crossed it, changing bytes mid-session. Now the first-applied strategy is kept forever.
+- The dedup placeholder text embeds the message's own content length, which is fixed, so it is already stable — it never needs to be recomputed.
+
 On by default (`PROMPT_COMPRESSION=0` to start with it off instead), and toggleable live without a restart:
 
 ```bash
@@ -248,6 +254,25 @@ curl -X POST http://localhost:8082/v1/compression -d '{"enabled":false}'    # fl
 ```
 
 The menu bar app (below) exposes the same toggle as a checkbox, with cumulative savings in its tooltip.
+
+## Session tracking
+
+`GET /v1/sessions` reports per-conversation continuity tracking (`session.go`): the gateway computes a stable session key (SHA-256 of the canonical serialization of model + messages[:k]) and detects **session breaks** — moments where the byte stream forwarded to the backend diverged from the previous turn of the same conversation (an edited old message, a `/compact` rewrite, an auto-continue). Because rapid-mlx's prefix cache is content-addressed (no session id), a session break here predicts a prefix-cache miss there; the tracker exists to make our own compression's byte stability provable and to distinguish client-side history rewrites from gateway-side instability.
+
+```bash
+curl http://localhost:8082/v1/sessions
+# {"conversations":N,"total_breaks":N,"last_stable_prefix":N,"last_broke":bool,...}
+```
+
+Append-only growth of a conversation never reports a break; an edit to an old message does. Covered by `session_test.go`.
+
+## KV checkpoint lifecycle
+
+rapid-mlx's disk-backed KV checkpoints (`~/.cache/rapid-mlx/kv_checkpoints/`) are **disabled** by the gateway's launcher: `launchMLX` passes `--kv-disk-checkpoint-interval 0`. The checkpoints snapshot the whole live KV at fixed token boundaries, but the load path only runs at startup, so with every request getting a fresh request id the disk churn was pure I/O waste on the generation hot path (measured 2026-08-18: ~20 GiB written and evicted in one session, zero loads). Two complementary cleanups keep the disk from filling with stale snapshots anyway:
+- **Automatic** — `loadModelLocked` clears `kv_checkpoints/` on every model switch, right after killing the previous backend: a switch invalidates every checkpoint because the request hash embeds the model name.
+- **Manual** — the menu bar app's **Clear Disk Caches** item deletes the same directory on demand and reports how much space was freed.
+
+The persisted prefix cache (`~/.cache/rapid-mlx/prefix_cache/`, saved at shutdown / loaded at startup) is deliberately *not* touched by either cleanup — it's per-model and still useful to the model being loaded.
 
 ## Running as a background service (macOS)
 
@@ -279,6 +304,7 @@ Reading it top to bottom:
 - **`OCR`** / **`FLUX (Image Generation)`** — one section per media pool, appearing only if `models.json` has entries for it. Same shape as `rapid-mlx`/`ds4` above: one shared **Start**/**Stop** and a model list, switching within the pool is exclusive (loading a different FLUX model kills the previous one). Neither pool ever touches the chat backend or the other pool.
 - **Start All** / **Stop All** — bulk versions of the above.
 - **Reload Settings** — the model list is only read from `models.json` once, at startup, and there's no clean way to rebuild an existing systray submenu tree in place — so this relaunches a fresh copy of the app (which reads `models.json` fresh) and quits the current one. Use it after editing `models.json` by hand, or after `unified-gateway` itself changes it.
+- **Clear Disk Caches** — deletes rapid-mlx's orphaned disk KV checkpoints (`~/.cache/rapid-mlx/kv_checkpoints/`) and shows a native notification with how much space was freed. These are only ever read at backend startup, so deleting them live is safe; with the gateway's launcher disabling new checkpoints (see [KV checkpoint lifecycle](#kv-checkpoint-lifecycle)), whatever accumulates is pure stale snapshot. A model switch clears them automatically anyway — this is the manual on-demand counterpart.
 - **Quit Menu Bar** — closes only this tray app. It never touches the gateway, the model backend, or Ollama; see [below](#why-two-separate-launchagents) for why.
 
 **Port conflicts are handled at click time, not as a status you have to interpret.** Clicking any "Start" item first checks whether its target port is already occupied by something else; if so, a native confirmation dialog asks whether to stop it and proceed. Switching between models *within* the same backend (clicking a different model in `rapid-mlx`'s own list, say) never prompts — that's the everyday case and stays as frictionless as running `unified-gateway load <name>` directly.
