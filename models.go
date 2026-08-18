@@ -377,6 +377,41 @@ func killPort(port int) {
 	}
 }
 
+// clearDiskKVCheckpoints removes rapid-mlx's disk-backed KV checkpoints
+// (~/.cache/rapid-mlx/kv_checkpoints/). Called automatically on every model
+// switch (loadModelLocked): with --kv-disk-checkpoint-interval 0 (the
+// launcher default) no NEW checkpoints are written, but the ones accumulated
+// before that fix — or by a previous model — are keyed by the OLD model's
+// request hash (request_hash includes the model name), so a switched model
+// can never reuse them. Deleting them here keeps the disk from silently
+// filling with stale snapshots across model switches. The persisted
+// prefix_cache/ (per-model subdirs, saved at shutdown / loaded at startup)
+// is deliberately NOT touched: those are still useful for the model being
+// loaded.
+func clearDiskKVCheckpoints() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	root := filepath.Join(home, ".cache", "rapid-mlx", "kv_checkpoints")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return // missing or unreadable -- nothing to clear
+	}
+	removed := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if os.RemoveAll(filepath.Join(root, e.Name())) == nil {
+			removed++
+		}
+	}
+	if removed > 0 {
+		fmt.Printf("[unified-gateway] cleared %d stale KV checkpoint dir(s) from %s\n", removed, root)
+	}
+}
+
 func waitForPort(port int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://127.0.0.1:%d/v1/models", port)
@@ -815,6 +850,14 @@ func loadModelLocked(shortName string) error {
 
 		fmt.Printf("[unified-gateway] loading %s (%s) on :%d...\n", shortName, m.Label, port)
 		killPort(port)
+
+		// The model switch invalidates every disk KV checkpoint accumulated
+		// by the previous model: they're keyed by that model's request hash
+		// (request_hash includes the model name), so a switched model can
+		// never reuse them, and with --kv-disk-checkpoint-interval 0 no new
+		// ones are written either. Clear them now, before the new backend
+		// starts, so its startup scan doesn't load stale snapshots.
+		clearDiskKVCheckpoints()
 
 		var cmd *exec.Cmd
 		switch m.Backend {
