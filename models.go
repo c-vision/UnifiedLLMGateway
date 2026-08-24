@@ -69,6 +69,21 @@ type ModelConfig struct {
 	// self-match; passed as "--tool-call-parser <value>
 	// --enable-auto-tool-choice" in launchMLX.
 	ToolCallParser string `json:"tool_call_parser,omitempty"`
+	// Ds4SsdStreaming passes --ssd-streaming to ds4-server (launchDS4)
+	// instead of ds4's default full-residency load. Full residency has
+	// no memory headroom check anywhere in ds4 before prefill -- it just
+	// mmaps the whole model and hopes the Metal driver can still find
+	// room for prefill's transient command-buffer allocations, which
+	// fails with a raw kIOGPUCommandBufferCallbackErrorOutOfMemory once
+	// there isn't much RAM left over after the model itself. --ssd-streaming
+	// is ds4's own opt-in path with real headroom accounting (reserves an
+	// explicit prefill-headroom budget up front) -- verified directly on
+	// the antirez/ds4flash.gguf model (90.88 GiB) on a 128 GiB M5 Max:
+	// full residency failed prefill with that exact OOM error, the same
+	// model with this flag set planned 50.20 GiB total and completed a
+	// real chat completion successfully. Only needed for models large
+	// enough that full residency doesn't leave comfortable headroom.
+	Ds4SsdStreaming bool `json:"ds4_ssd_streaming,omitempty"`
 }
 
 type Config struct {
@@ -583,6 +598,9 @@ func launchDS4(cfg *Config, m ModelConfig, port int) (*exec.Cmd, error) {
 		"--metal", "--ctx", fmt.Sprintf("%d", ctx),
 		"--power", "100",
 		"--host", "127.0.0.1", "--port", fmt.Sprintf("%d", port),
+	}
+	if m.Ds4SsdStreaming {
+		args = append(args, "--ssd-streaming")
 	}
 	cmd := exec.Command(ds4Server, args...)
 	cmd.Dir = cfg.DS4Dir

@@ -14,7 +14,8 @@
       "path": "~/ds4/ds4flash.gguf",
       "label": "DS4 Antirez (MoE, mixed-bit GGUF)",
       "backend": "ds4",
-      "ctx": 32768
+      "ctx": 32768,
+      "ds4_ssd_streaming": true
     },
     "qw122": {
       "path": "~/ai/Models/Qwen3.5-122B-A10B-mxfp4",
