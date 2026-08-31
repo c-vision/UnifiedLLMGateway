@@ -37,10 +37,6 @@ type refreshRefs struct {
 	mStartFlux    *systray.MenuItem // permanently disabled by addStartItem if fluxDefault == ""
 	mStopFlux     *systray.MenuItem
 	fluxDefault   string            // model Start FLUX loads; "" if none configured
-	mSmall        *systray.MenuItem // nil if no "kind":"small" entries configured
-	mStartSmall   *systray.MenuItem // permanently disabled by addStartItem if smallDefault == ""
-	mStopSmall    *systray.MenuItem
-	smallDefault  string // model Start Small loads; "" if none configured
 }
 
 // setEnabled is a small helper since MenuItem only exposes Enable/Disable,
@@ -182,11 +178,11 @@ func refreshLoop(r refreshRefs) {
 			fluxModel, fluxActive = runningFluxModel(r.cfg, r.cfg.FluxBackendPort)
 			switch {
 			case fluxActive && fluxModel != "":
-				r.mFlux.SetTitle(fmt.Sprintf("🟢 FLUX %s (port %d)", fluxModel, r.cfg.FluxBackendPort))
-			case fluxActive:
-				r.mFlux.SetTitle(fmt.Sprintf("🟢 FLUX (port %d)", r.cfg.FluxBackendPort))
-			default:
-				r.mFlux.SetTitle("🔴 FLUX (Image Generation)")
+r.mFlux.SetTitle(fmt.Sprintf("🟢 FLUX %s (port %d)", fluxModel, r.cfg.FluxBackendPort))
+		case fluxActive:
+			r.mFlux.SetTitle(fmt.Sprintf("🟢 FLUX (port %d)", r.cfg.FluxBackendPort))
+		default:
+			r.mFlux.SetTitle("🔴 IMAGES")
 			}
 			if r.fluxDefault != "" {
 				setEnabled(r.mStartFlux, !fluxActive)
@@ -197,30 +193,6 @@ func refreshLoop(r refreshRefs) {
 		// "small" models (opencode's small_model, etc.) are their own POOL
 		// on cfg.SmallBackendPort -- same live-detection pattern as the
 		// media pools above, but sized so a cheap secondary model stays
-		// resident without ever killing the main chat model.
-		var smallModel string
-		var smallActive bool
-		if r.cfg != nil && r.mSmall != nil {
-			smallModel, smallActive = runningMLXModel(r.cfg.SmallBackendPort)
-			if !smallActive {
-				if m, active := runningDS4Model(r.cfg, r.cfg.SmallBackendPort); active {
-					smallModel, smallActive = m, true
-				}
-			}
-			switch {
-			case smallActive && smallModel != "":
-				r.mSmall.SetTitle(fmt.Sprintf("🟢 Small %s (port %d)", smallModel, r.cfg.SmallBackendPort))
-			case smallActive:
-				r.mSmall.SetTitle(fmt.Sprintf("🟢 Small (port %d)", r.cfg.SmallBackendPort))
-			default:
-				r.mSmall.SetTitle("🔴 Small Models")
-			}
-			if r.smallDefault != "" {
-				setEnabled(r.mStartSmall, !smallActive)
-			}
-			setEnabled(r.mStopSmall, smallActive)
-		}
-
 		ollamaPort := 11434
 		if r.cfg != nil && r.cfg.OllamaPort != 0 {
 			ollamaPort = r.cfg.OllamaPort

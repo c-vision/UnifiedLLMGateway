@@ -19,12 +19,14 @@ import (
 // won't let one main package import another), so the fields are kept in
 // sync by hand with models.go's Config/ModelConfig.
 type modelConfig struct {
-	Path        string `json:"path,omitempty"`
-	Label       string `json:"label"`
-	Backend     string `json:"backend"`
-	OllamaModel string `json:"ollama_model,omitempty"`
-	Kind        string `json:"kind,omitempty"`
-	Ctx         int    `json:"ctx,omitempty"`
+	Path             string `json:"path,omitempty"`
+	Label            string `json:"label"`
+	Backend          string `json:"backend"`
+	OllamaModel      string `json:"ollama_model,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	Ctx              int    `json:"ctx,omitempty"`
+	DflashDraftModel string `json:"dflash_draft_model,omitempty"`
+	DflashBlockSize  int    `json:"dflash_block_size,omitempty"`
 }
 
 // MediaBackendPort/FluxBackendPort are the two media POOLS -- OCR-like
@@ -101,6 +103,7 @@ func loadGWConfig() (*gwConfig, error) {
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
+		m.DflashDraftModel = expandHome(m.DflashDraftModel)
 		cfg.Models[name] = m
 	}
 	return &cfg, nil
@@ -171,15 +174,63 @@ func commandFlagValue(cmd, flag string) string {
 	return ""
 }
 
-// runningMLXModel reports whether rapid-mlx is the process on port, and
-// if so, which model it's serving — read directly from its own
-// --served-model-name argument, not from any bookkeeping file.
+// runningMLXModel reports the model served by rapid-mlx or oMLX. Rapid-MLX
+// exposes --served-model-name; isolated oMLX processes encode the same
+// shortname as the final component of --base-path.
 func runningMLXModel(port int) (shortName string, active bool) {
 	cmd := portOwnerCommand(port)
-	if !strings.Contains(cmd, "rapid-mlx") {
-		return "", false
+	if strings.Contains(cmd, "rapid-mlx") {
+		return commandFlagValue(cmd, "--served-model-name"), true
 	}
-	return commandFlagValue(cmd, "--served-model-name"), true
+	if strings.Contains(cmd, "omlx") {
+		basePath := commandFlagValue(cmd, "--base-path")
+		if basePath != "" {
+			return filepath.Base(basePath), true
+		}
+		// omlx-server clears its own argv (ps shows just "omlx-server", never
+		// the --base-path), so ask the server directly which model is loaded.
+		return runningOmlxModel(port), true
+	}
+	return "", false
+}
+
+// omlxGatewayAPIKey mirrors the gateway's shared key, which the isolated
+// oMLX server we spawn is launched with (--api-key). Needed to poll its
+// /v1/models/status (every oMLX route is gated behind the API key).
+const omlxGatewayAPIKey = "unified-gateway-local"
+
+// runningOmlxModel asks the oMLX server on port which model it currently has
+// loaded and returns the gateway shortname (the profile's model_alias), or ""
+// if it can't be determined.
+func runningOmlxModel(port int) string {
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/v1/models/status", port), nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+omlxGatewayAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	var parsed struct {
+		Models []struct {
+			Loaded     bool   `json:"loaded"`
+			ModelAlias string `json:"model_alias"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return ""
+	}
+	for _, m := range parsed.Models {
+		if m.Loaded && m.ModelAlias != "" {
+			return m.ModelAlias
+		}
+	}
+	return ""
 }
 
 // runningDS4Model reports whether ds4-server is the process on port, and

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -17,6 +18,11 @@ import (
 func estimateDiskGB(path string) float64 {
 	if path == "" {
 		return 0
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path[2:])
+		}
 	}
 	info, err := os.Stat(path)
 	if err != nil {

@@ -8,6 +8,7 @@
   "small_backend_port": 11438,
   "mflux_venv_dir": "~/ai/env-mflux",
   "flux_server_script": "~/ai/flux-server/server.py",
+  "omlx_bin": "/opt/homebrew/bin/omlx",
   "stall_watchdog_threshold_seconds": 1200,
   "models": {
     "antirez": {
@@ -33,6 +34,28 @@
       "has_vision": true,
       "ctx": 262144,
       "quant_bits": 8
+    },
+    "qw38dflash2": {
+      "path": "/Users/gaetano/ai/Models/Qwen3.8-27B-8bit",
+      "label": "Qwen3.8-27B (8-bit, vision, DFlash2)",
+      "backend": "mlx",
+      "model_type": "qwen3_5",
+      "has_vision": true,
+      "ctx": 262144,
+      "quant_bits": 8,
+      "dflash_draft_model": "/Users/gaetano/ai/Models/Qwen3.8-27B-DFlash2",
+      "dflash_block_size": 5
+    },
+    "qw38flash": {
+      "path": "~/ai/Models/Qwen3.8-Flash-Next-MLX-Serve-4bit",
+      "label": "Qwen3.8-Flash-Next (4-bit, qwen4_exp, MTP)",
+      "backend": "omlx",
+      "model_type": "qwen4_exp",
+      "has_vision": false,
+      "ctx": 32768,
+      "quant_bits": 4,
+      "mtp_enabled": true,
+      "working_set_multiplier": 1.5
     },
     "qw3627": {
       "path": "~/ai/Models/Qwen3.6-27B-4bit",

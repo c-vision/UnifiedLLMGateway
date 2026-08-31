@@ -144,7 +144,14 @@ func estimateModelSizeGB(m ModelConfig) float64 {
 			total += fi.Size()
 		}
 	}
-	return float64(total) / (1024 * 1024 * 1024)
+	result := float64(total) / (1024 * 1024 * 1024)
+	if m.DflashDraftModel != "" {
+		draft := m
+		draft.Path = m.DflashDraftModel
+		draft.DflashDraftModel = ""
+		result += estimateModelSizeGB(draft)
+	}
+	return result
 }
 
 // runningRSSGB returns the RSS, in GB, of whatever process currently owns

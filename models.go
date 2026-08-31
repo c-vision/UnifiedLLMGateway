@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,9 +19,13 @@ import (
 // Model configuration (models.json, read from the executable's own directory)
 // ============================================================================
 
+const omlxGatewayAPIKey = "unified-gateway-local"
+
 // ModelConfig.Backend is one of:
 //   - "mlx"    — served via `rapid-mlx`, spawned/killed by us on Config.BackendPort
 //   - "ds4"    — served via `ds4-server`, same lifecycle as "mlx"
+//   - "omlx"   — served via the installed oMLX runtime; used for checkpoint
+//     formats (notably DFlash2) that Rapid-MLX/mlx-vlm cannot load
 //   - "ollama" — served by an already-running `ollama serve` on Config.OllamaPort;
 //     we never spawn/kill it, only warm up the requested model and point the
 //     gateway's routing at Ollama's own OpenAI-compatible endpoint. OllamaModel
@@ -84,6 +89,16 @@ type ModelConfig struct {
 	// real chat completion successfully. Only needed for models large
 	// enough that full residency doesn't leave comfortable headroom.
 	Ds4SsdStreaming bool `json:"ds4_ssd_streaming,omitempty"`
+	// DFlash support (rapid-mlx speculative decoding, DFlash2 for Qwen3.8).
+	// When set, launchMLX passes --speculative-config '{"method":"dflash","model":...}'
+	// instead of --no-spec-decode, enabling block-diffusion draft verification.
+	// Requires rapid-mlx built-in alias supports_dflash=true (e.g. qwen3.8-27b-8bit
+	// added in aliases.json) and draft model at DflashDraftModel (HF ID or local path).
+	// For quantized targets, dflash needs block_size <=5 (z-lab/dflash README).
+	DflashDraftModel     string  `json:"dflash_draft_model,omitempty"`
+	DflashBlockSize      int     `json:"dflash_block_size,omitempty"`
+	MTPEnabled           bool    `json:"mtp_enabled,omitempty"`
+	WorkingSetMultiplier float64 `json:"working_set_multiplier,omitempty"`
 }
 
 type Config struct {
@@ -96,6 +111,7 @@ type Config struct {
 	DS4Dir                         string                 `json:"ds4_dir"`
 	MfluxVenvDir                   string                 `json:"mflux_venv_dir,omitempty"`
 	FluxServerScript               string                 `json:"flux_server_script,omitempty"`
+	OmlxBin                        string                 `json:"omlx_bin,omitempty"`
 	MemoryWatchdogThresholdPercent float64                `json:"memory_watchdog_threshold_percent,omitempty"`
 	MemoryWatchdogIntervalSeconds  int                    `json:"memory_watchdog_interval_seconds,omitempty"`
 	StallWatchdogThresholdSeconds  int                    `json:"stall_watchdog_threshold_seconds,omitempty"`
@@ -130,6 +146,10 @@ func loadConfig() (*Config, error) {
 	cfg.VenvDir = expandHome(cfg.VenvDir)
 	cfg.DS4Dir = expandHome(cfg.DS4Dir)
 	cfg.MfluxVenvDir = expandHome(cfg.MfluxVenvDir)
+	cfg.OmlxBin = expandHome(cfg.OmlxBin)
+	if cfg.OmlxBin == "" {
+		cfg.OmlxBin = "/opt/homebrew/bin/omlx"
+	}
 	cfg.FluxServerScript = expandHome(cfg.FluxServerScript)
 	if cfg.OllamaPort == 0 {
 		cfg.OllamaPort = 11434
@@ -157,6 +177,7 @@ func loadConfig() (*Config, error) {
 	}
 	for name, m := range cfg.Models {
 		m.Path = expandHome(m.Path)
+		m.DflashDraftModel = expandHome(m.DflashDraftModel)
 		cfg.Models[name] = m
 	}
 	return &cfg, nil
@@ -265,6 +286,16 @@ func runningBackendModel(cfg *Config, port int) string {
 	if strings.Contains(cmd, "rapid-mlx") {
 		return commandFlagValue(cmd, "--served-model-name")
 	}
+	if strings.Contains(cmd, "omlx") {
+		basePath := commandFlagValue(cmd, "--base-path")
+		if basePath != "" {
+			return filepath.Base(basePath)
+		}
+		// omlx-server clears its own argv (ps shows just "omlx-server",
+		// never the --base-path), so the command line can't tell us which
+		// model it's serving. Ask the server directly which model is loaded.
+		return runningOmlxModel(cfg, port)
+	}
 	if strings.Contains(cmd, "ds4-server") {
 		path := commandFlagValue(cmd, "--model")
 		for name, m := range cfg.Models {
@@ -284,7 +315,54 @@ func runningBackendModel(cfg *Config, port int) string {
 	return ""
 }
 
-// queryOllamaLoadedModel asks Ollama's own API which model it currently
+// runningOmlxModel asks the oMLX server (using the gateway's shared API
+// key) which model it currently has loaded, and returns the gateway
+// shortname for it. oMLX exposes /v1/models/status which carries each
+// model's loaded state plus the profile model_alias (= the gateway
+// shortname); if the alias is absent we match the model id (the model
+// directory basename) back against configured omlx entries.
+func runningOmlxModel(cfg *Config, port int) string {
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/v1/models/status", port), nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+omlxGatewayAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	var parsed struct {
+		Models []struct {
+			ID         string `json:"id"`
+			Loaded     bool   `json:"loaded"`
+			ModelAlias string `json:"model_alias"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return ""
+	}
+	for _, m := range parsed.Models {
+		if !m.Loaded {
+			continue
+		}
+		if m.ModelAlias != "" {
+			return m.ModelAlias
+		}
+		// Fall back: match the model directory basename against omlx entries.
+		for name, mc := range cfg.Models {
+			if mc.Backend == "omlx" && filepath.Base(mc.Path) == m.ID {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+
 // has loaded in memory (its own tag, e.g. "gemma4:31b-mlx"), "" if none.
 func queryOllamaLoadedModel(port int) string {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/ps", port))
@@ -464,11 +542,15 @@ func clearDiskKVCheckpoints() {
 	}
 }
 
-func waitForPort(port int, timeout time.Duration) bool {
+func waitForPort(port int, timeout time.Duration, apiKey string) bool {
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://127.0.0.1:%d/v1/models", port)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
@@ -478,6 +560,18 @@ func waitForPort(port int, timeout time.Duration) bool {
 		time.Sleep(2 * time.Second)
 	}
 	return false
+}
+
+// omlxAPIKey returns the Bearer token to send when polling a backend's
+// readiness on the given backend, or "" for backends that don't require
+// auth on /v1/models. oMLX gates every route (including /v1/models) behind
+// an API key, so the gateway must send its shared key or the readiness poll
+// sees a 401 and would never pass -- and preloadOMLX would never run.
+func omlxAPIKey(backend string) string {
+	if backend == "omlx" {
+		return omlxGatewayAPIKey
+	}
+	return ""
 }
 
 func launchMLX(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cmd, error) {
@@ -491,7 +585,16 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cm
 	if (m.ModelType == "qwen3" || m.ModelType == "qwen3_5" || m.ModelType == "qwen2_moe") && m.HasVision {
 		args = append(args, "--text-only", "--no-mllm")
 	}
-	if m.ModelType == "qwen3" || m.ModelType == "qwen3_5" || m.ModelType == "qwen2_moe" {
+	// DFlash takes precedence over --no-spec-decode: when a draft is configured,
+	// speculative decoding must stay enabled (enable_dflash branch). Gate on
+	// DflashDraftModel so only qw38-dflash (or future DFlash2 models) enable it.
+	if m.DflashDraftModel != "" {
+		draftPath := expandHome(m.DflashDraftModel)
+		// For DFlash, speculative-config only supports method+model (no num_speculative_tokens)
+		// Block size for quantized targets (<=5) is handled internally by the DFlash server.
+		specCfg := fmt.Sprintf(`{"method":"dflash","model":%q}`, draftPath)
+		args = append(args, "--speculative-config", specCfg)
+	} else if m.ModelType == "qwen3" || m.ModelType == "qwen3_5" || m.ModelType == "qwen2_moe" {
 		args = append(args, "--no-spec-decode")
 	}
 	if m.ToolCallParser != "" {
@@ -614,6 +717,94 @@ func launchDS4(cfg *Config, m ModelConfig, port int) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+// launchOMLX creates an isolated local profile for one gateway shortname.
+// The user's oMLX GUI settings remain untouched, and --base-path doubles as
+// live process identity for runningBackendModel.
+func launchOMLX(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cmd, error) {
+	basePath := filepath.Join(gatewayDir(), "omlx", shortName)
+	if err := writeOMLXProfile(basePath, shortName, m); err != nil {
+		return nil, err
+	}
+	args := []string{
+		"serve", "--model-dir", filepath.Dir(m.Path),
+		"--host", "127.0.0.1", "--port", fmt.Sprintf("%d", port),
+		"--base-path", basePath, "--memory-guard", "balanced",
+		"--max-concurrent-requests", "1", "--no-cache",
+		"--api-key", omlxGatewayAPIKey,
+	}
+	cmd := exec.Command(cfg.OmlxBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if logFile, err := os.OpenFile(filepath.Join(gatewayDir(), "omlx.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
+
+func writeOMLXProfile(basePath, shortName string, m ModelConfig) error {
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return fmt.Errorf("create oMLX base path: %w", err)
+	}
+	settings := map[string]any{
+		"model_alias":    shortName,
+		"is_hidden":      false,
+		"dflash_enabled": m.DflashDraftModel != "",
+		"mtp_enabled":    m.MTPEnabled,
+	}
+	if m.DflashDraftModel != "" {
+		settings["dflash_draft_model"] = m.DflashDraftModel
+		settings["dflash_draft_quant_enabled"] = false
+		settings["dflash_block_size"] = m.DflashBlockSize
+		settings["dflash_max_ctx"] = m.Ctx
+	}
+	profile := map[string]any{
+		"version": 1,
+		"models":  map[string]any{filepath.Base(m.Path): settings},
+	}
+	data, err := json.MarshalIndent(profile, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(basePath, "model_settings.json"), append(data, '\n'), 0644); err != nil {
+		return fmt.Errorf("write oMLX model profile: %w", err)
+	}
+	return nil
+}
+
+func preloadOMLX(port int, m ModelConfig) error {
+	modelID := url.PathEscape(filepath.Base(m.Path))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/admin/api/models/%s/load", port, modelID), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+omlxGatewayAPIKey)
+	resp, err := (&http.Client{Timeout: 15 * time.Minute}).Do(req)
+	if err != nil {
+		return fmt.Errorf("oMLX preload request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("oMLX preload returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func launchConfiguredBackend(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cmd, error) {
+	switch m.Backend {
+	case "ds4":
+		return launchDS4(cfg, m, port)
+	case "mflux":
+		return launchMflux(cfg, m, port)
+	case "omlx":
+		return launchOMLX(cfg, shortName, m, port)
+	default:
+		return launchMLX(cfg, shortName, m, port)
+	}
+}
+
 // launchMflux spawns the persistent Python server (cfg.FluxServerScript,
 // run from cfg.MfluxVenvDir) that wraps mflux's Python API -- mflux itself
 // has no server mode, only one-shot CLI commands that reload the model
@@ -669,7 +860,7 @@ func ensureGatewayRunning() {
 		fmt.Printf("[unified-gateway] WARNING: failed to start gateway adapters: %v\n", err)
 		return
 	}
-	waitForPort(8082, 15*time.Second)
+	waitForPort(8082, 15*time.Second, "")
 }
 
 var (
@@ -858,6 +1049,28 @@ func loadModelLocked(shortName string) error {
 		}
 		return fmt.Errorf("unknown model %q — available: %s", shortName, strings.Join(names, ", "))
 	}
+	if m.Backend != "mlx" && m.Backend != "ds4" && m.Backend != "ollama" && m.Backend != "mflux" && m.Backend != "omlx" {
+		return fmt.Errorf("model %q has unsupported backend %q", shortName, m.Backend)
+	}
+	if m.Backend != "ollama" {
+		info, statErr := os.Stat(m.Path)
+		if statErr != nil || (m.Backend != "ds4" && !info.IsDir()) {
+			return fmt.Errorf("model %q path is not usable: %s", shortName, m.Path)
+		}
+	}
+	if m.DflashDraftModel != "" {
+		// DFlash2 is supported by both backends: omlx (native dflash_mlx) and
+		// mlx/rapid-mlx (vendored drafter). A model with a draft may use either.
+		if m.Backend != "omlx" && m.Backend != "mlx" {
+			return fmt.Errorf("model %q uses a DFlash2 checkpoint and must use backend omlx or mlx", shortName)
+		}
+		if _, statErr := os.Stat(m.DflashDraftModel); statErr != nil {
+			return fmt.Errorf("model %q DFlash draft path is not usable: %s", shortName, m.DflashDraftModel)
+		}
+		if m.DflashBlockSize <= 0 {
+			return fmt.Errorf("model %q requires a positive dflash_block_size", shortName)
+		}
+	}
 
 	if m.Backend == "ollama" {
 		upstreamModel := m.OllamaModel
@@ -897,12 +1110,17 @@ func loadModelLocked(shortName string) error {
 				// size estimate.
 				required += float64(mlxCacheReserveMBFor(required)) / 1024.0
 			}
+			if m.WorkingSetMultiplier > 1 {
+				required *= m.WorkingSetMultiplier
+			}
 			freeing := runningRSSGB(port)
 			if ok, msg := checkMemory(required, freeing); !ok {
 				return fmt.Errorf("%s", msg)
 			}
 		}
 
+		previousName := runningBackendModel(cfg, port)
+		previous, hadPrevious := cfg.Models[previousName]
 		fmt.Printf("[unified-gateway] loading %s (%s) on :%d...\n", shortName, m.Label, port)
 		killPort(port)
 
@@ -914,15 +1132,7 @@ func loadModelLocked(shortName string) error {
 		// starts, so its startup scan doesn't load stale snapshots.
 		clearDiskKVCheckpoints()
 
-		var cmd *exec.Cmd
-		switch m.Backend {
-		case "ds4":
-			cmd, err = launchDS4(cfg, m, port)
-		case "mflux":
-			cmd, err = launchMflux(cfg, m, port)
-		default:
-			cmd, err = launchMLX(cfg, shortName, m, port)
-		}
+		cmd, err := launchConfiguredBackend(cfg, shortName, m, port)
 		if err != nil {
 			return fmt.Errorf("failed to launch backend: %w", err)
 		}
@@ -935,8 +1145,25 @@ func loadModelLocked(shortName string) error {
 		if m.Backend == "mflux" {
 			readyTimeout = 300 * time.Second
 		}
-		if !waitForPort(port, readyTimeout) {
-			return fmt.Errorf("backend did not become ready on :%d", port)
+		ready := waitForPort(port, readyTimeout, omlxAPIKey(m.Backend))
+		if ready && m.Backend == "omlx" {
+			err = preloadOMLX(port, m)
+			ready = err == nil
+		}
+		if !ready {
+			failure := fmt.Errorf("backend did not become ready on :%d", port)
+			if err != nil {
+				failure = err
+			}
+			killPort(port)
+			if hadPrevious && previousName != shortName {
+				fmt.Printf("[unified-gateway] restoring previous backend %s after failed load...\n", previousName)
+				if restored, restoreErr := launchConfiguredBackend(cfg, previousName, previous, port); restoreErr == nil && waitForPort(port, readyTimeout, omlxAPIKey(previous.Backend)) {
+					go restored.Wait()
+					return fmt.Errorf("%v; previous backend %s restored", failure, previousName)
+				}
+			}
+			return failure
 		}
 		fmt.Printf("[unified-gateway] %s ready on :%d\n", m.Label, port)
 		crashTracker.recordLoad(shortName)

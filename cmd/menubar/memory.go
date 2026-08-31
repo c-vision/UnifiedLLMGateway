@@ -94,7 +94,7 @@ const (
 )
 
 // memoryStatusLine renders a one-line summary for the menu item title:
-// "🟢 RAM: 92.1/128 GB free (72%)". Falls back to a plain dash if either
+// "🟢 RAM: 92.1/128 GB (72% free)". Falls back to a plain dash if either
 // reading comes back zero (vm_stat/sysctl unavailable or parse failure).
 func memoryStatusLine() string {
 	total := totalRAMGB()
@@ -110,5 +110,5 @@ func memoryStatusLine() string {
 	case percent < memoryWarnPercent:
 		icon = "🟡"
 	}
-	return fmt.Sprintf("%s RAM: %.1f/%.0f GB free (%.0f%%)", icon, free, total, percent)
+	return fmt.Sprintf("%s RAM: %.1f/%.0f GB (%.0f%% free)", icon, free, total, percent)
 }

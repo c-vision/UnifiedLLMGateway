@@ -10,6 +10,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/getlantern/systray"
 )
@@ -41,6 +42,13 @@ func addModelItems(parent *systray.MenuItem, cfg *gwConfig, names []string, mode
 	sort.Strings(names) // stable alphabetical tie-break before the real sort
 	sort.SliceStable(names, func(i, j int) bool {
 		di, dj := estimateDiskGB(cfg.Models[names[i]].Path), estimateDiskGB(cfg.Models[names[j]].Path)
+		// qw38dflash2 shares same Path as qw38, but total with draft is +1GB
+		if names[i] == "qw38dflash2" {
+			di += 1
+		}
+		if names[j] == "qw38dflash2" {
+			dj += 1
+		}
 		if di == 0 {
 			di = math.Inf(1)
 		}
@@ -55,7 +63,12 @@ func addModelItems(parent *systray.MenuItem, cfg *gwConfig, names []string, mode
 		if m.Ctx > 0 {
 			extra = append(extra, formatCtx(m.Ctx))
 		}
-		if disk := estimateDiskGB(m.Path); disk > 0 {
+		disk := estimateDiskGB(m.Path)
+		// qw38 shows 27GB via .safetensors sum, but du is 28G — and dflash adds draft
+		if n == "qw38dflash2" && disk > 0 {
+			disk += 1 // draft 975M ≈1G
+		}
+		if disk > 0 {
 			extra = append(extra, fmt.Sprintf("%.0fGB", disk))
 		}
 		// Insert ctx/disk into m.Label's own trailing "(...)" group (the
@@ -140,8 +153,7 @@ func onReady() {
 	var mMLX, mDS4, mStartMLX, mStartDS4, mStopMLX, mStopDS4 *systray.MenuItem
 	var mOCR, mStartOCR, mStopOCR *systray.MenuItem
 	var mFlux, mStartFlux, mStopFlux *systray.MenuItem
-	var mSmall, mStartSmall, mStopSmall *systray.MenuItem
-	var mlxDefault, ds4Default, ocrDefault, fluxDefault, smallDefault string
+	var mlxDefault, ds4Default, ocrDefault, fluxDefault, omlxDefault string
 
 	if cfgErr != nil {
 		mMissing := systray.AddMenuItem("Backends unavailable (models.json not found)", "")
@@ -156,7 +168,7 @@ func onReady() {
 		// within the pool (loading flux2-klein-4b kills flux1-dev if it
 		// was running, same as loading a different chat model kills the
 		// previous one) -- but the pools never touch each other.
-		var mlxNames, ds4Names, ocrNames, fluxNames, smallNames []string
+		var mlxNames, ds4Names, ocrNames, fluxNames, smallNames, omlxNames []string
 		for n, m := range cfg.Models {
 			if m.Kind == "media" {
 				if m.Backend == "mflux" {
@@ -173,6 +185,9 @@ func onReady() {
 			switch m.Backend {
 			case "mlx":
 				mlxNames = append(mlxNames, n)
+			case "omlx":
+				mlxNames = append(mlxNames, n)
+				omlxNames = append(omlxNames, n)
 			case "ds4":
 				ds4Names = append(ds4Names, n)
 			}
@@ -182,9 +197,13 @@ func onReady() {
 		sort.Strings(ocrNames)
 		sort.Strings(fluxNames)
 		sort.Strings(smallNames)
+		sort.Strings(omlxNames)
 
 		if len(mlxNames) > 0 {
 			mlxDefault = mlxNames[0]
+		}
+		if len(omlxNames) > 0 {
+			omlxDefault = omlxNames[0]
 		}
 		if len(ds4Names) > 0 {
 			ds4Default = ds4Names[0]
@@ -195,14 +214,13 @@ func onReady() {
 		if len(fluxNames) > 0 {
 			fluxDefault = fluxNames[0]
 		}
-		if len(smallNames) > 0 {
-			smallDefault = smallNames[0]
-		}
 
 		mMLX = systray.AddMenuItem("rapid-mlx", "")
 		mStartMLX = addStartItem(mMLX, "Start rapid-mlx", mlxDefault, cfg.BackendPort)
 		mStopMLX = mMLX.AddSubMenuItem("Stop rapid-mlx", fmt.Sprintf("Stop the backend on port %d", cfg.BackendPort))
-		addModelItems(mMLX, cfg, mlxNames, modelItems)
+		// Mostra i modelli small (bonsai) INSIEME ai normali nel menù rapid-mlx
+		// (esecuzione su porta small separata -> concorrente, routing via m.Kind).
+		addModelItems(mMLX, cfg, append(append([]string{}, mlxNames...), smallNames...), modelItems)
 
 		mDS4 = systray.AddMenuItem("ds4", "")
 		mStartDS4 = addStartItem(mDS4, "Start ds4", ds4Default, cfg.BackendPort)
@@ -219,16 +237,10 @@ func onReady() {
 			addModelItems(mOCR, cfg, ocrNames, modelItems)
 		}
 		if len(fluxNames) > 0 {
-			mFlux = systray.AddMenuItem("FLUX (Image Generation)", "Image-generation models via mflux -- own pool, own port, independent of the chat backend and of OCR")
-			mStartFlux = addStartItem(mFlux, "Start FLUX", fluxDefault, cfg.FluxBackendPort)
-			mStopFlux = mFlux.AddSubMenuItem("Stop FLUX", fmt.Sprintf("Stop the backend on port %d", cfg.FluxBackendPort))
+			mFlux = systray.AddMenuItem("IMAGES", "Image-generation models (FLUX, Qwen-Image, etc.) via mflux -- own pool, own port, independent of the chat backend and of OCR")
+			mStartFlux = addStartItem(mFlux, "Start IMAGES", fluxDefault, cfg.FluxBackendPort)
+			mStopFlux = mFlux.AddSubMenuItem("Stop IMAGES", fmt.Sprintf("Stop the backend on port %d", cfg.FluxBackendPort))
 			addModelItems(mFlux, cfg, fluxNames, modelItems)
-		}
-		if len(smallNames) > 0 {
-			mSmall = systray.AddMenuItem("Small Models", "Cheap secondary models (e.g. opencode's small_model for conversation titles) -- own pool, own port, never kills the main chat model")
-			mStartSmall = addStartItem(mSmall, "Start Small", smallDefault, cfg.SmallBackendPort)
-			mStopSmall = mSmall.AddSubMenuItem("Stop Small", fmt.Sprintf("Stop the backend on port %d", cfg.SmallBackendPort))
-			addModelItems(mSmall, cfg, smallNames, modelItems)
 		}
 	}
 	systray.AddSeparator()
@@ -287,11 +299,25 @@ func onReady() {
 		mStartFlux:    mStartFlux,
 		mStopFlux:     mStopFlux,
 		fluxDefault:   fluxDefault,
-		mSmall:        mSmall,
-		mStartSmall:   mStartSmall,
-		mStopSmall:    mStopSmall,
-		smallDefault:  smallDefault,
 	})
+
+	// Avvia rapid-mlx di default al lancio (dopo che la GUI si è inizializzata):
+	// il modello small (bonsai) resta su porta separata e concorrente. Se sono
+	// configurati modelli oMLX (es. qw38dflash2) si avvia quello per default,
+	// altrimenti il primo modello rapid-mlx — come richiesto, il server oMLX
+	// parte di default allo stesso modo di rapid-mlx.
+	if omlxDefault != "" || mlxDefault != "" {
+		go func() {
+			time.Sleep(3 * time.Second)
+			target := omlxDefault
+			if target == "" {
+				target = mlxDefault
+			}
+			if _, active := runningMLXModel(cfg.BackendPort); !active {
+				loadModelAsync(target)
+			}
+		}()
+	}
 
 	ollamaPort := 11434
 	if cfg != nil && cfg.OllamaPort != 0 {
@@ -313,8 +339,6 @@ func onReady() {
 				killPort(cfg.MediaBackendPort)
 			case <-clickedOrNil(mStopFlux):
 				killPort(cfg.FluxBackendPort)
-			case <-clickedOrNil(mStopSmall):
-				killPort(cfg.SmallBackendPort)
 			case <-mOllamaStart.ClickedCh:
 				go func() {
 					if confirmPortFree(ollamaPort, "Ollama") {

@@ -27,7 +27,9 @@ var codingQualityIcon = map[string]string{
 	// same "qwen3_5" lineage as qw27/qw3627/qw27opus above -- replaces
 	// qw27 (removed) as the vision-capable general model in this tier.
 	// Untested in this catalog's own real agentic use yet.
-	"qw38": "🟡",
+	"qw38":         "🟡",
+	"qw38dflash2": "🟡", // same base as qw38, DFlash2 draft 975M mxfp4, block 5
+	"qw38flash":   "🟡", // labhraighlep Qwen3.8-Flash-Next 4-bit, coding-tuned small
 
 	// Promising on paper, unverified in this catalog's own real-world
 	// agentic use yet: gptoss20 reportedly beats its own 120B sibling on
@@ -60,7 +62,6 @@ var codingQualityIcon = map[string]string{
 	// code (gemma4/gemma4o, gptoss120, antirez).
 	"ds32":      "🔴",
 	"gemma4":    "🔴",
-	"gemma4o":   "🔴",
 	"mixtral":   "🔴",
 	"gptoss120": "🔴",
 	"antirez":   "🔴",

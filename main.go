@@ -205,7 +205,17 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 
 	body, _ := json.Marshal(openaiPayload)
 	backendURL := fmt.Sprintf("http://localhost:%d", backend.Port)
-	resp, err := http.Post(backendURL+"/v1/chat/completions", "application/json", bytes.NewBuffer(body))
+	backendReq, err := http.NewRequest(http.MethodPost, backendURL+"/v1/chat/completions", bytes.NewBuffer(body))
+	if err == nil {
+		backendReq.Header.Set("Content-Type", "application/json")
+		if cfg, cfgErr := loadConfig(); cfgErr == nil && cfg.Models[req.Model].Backend == "omlx" {
+			backendReq.Header.Set("Authorization", "Bearer "+omlxGatewayAPIKey)
+		}
+	}
+	var resp *http.Response
+	if err == nil {
+		resp, err = http.DefaultClient.Do(backendReq)
+	}
 	if err != nil {
 		if ensureBackendLoading(req.Model) {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("Local LLM Backend unreachable on %d", backend.Port)})
@@ -878,6 +888,9 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 	}
 	if ct := c.Request.Header.Get("Content-Type"); ct != "" {
 		proxyReq.Header.Set("Content-Type", ct)
+	}
+	if cfg, cfgErr := loadConfig(); cfgErr == nil && cfg.Models[originalModel].Backend == "omlx" {
+		proxyReq.Header.Set("Authorization", "Bearer "+omlxGatewayAPIKey)
 	}
 
 	resp, err := http.DefaultClient.Do(proxyReq)
