@@ -638,6 +638,7 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 			"label":      m.Label,
 			"backend":    m.Backend,
 			"has_vision": m.HasVision,
+			"kind":       m.Kind, // ""/chat, "small", or "media" — lets clients prefer a chat model over a resident small/media one
 			"active":     isActive,
 			"disabled":   m.Disabled,
 		})

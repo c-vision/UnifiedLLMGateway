@@ -331,17 +331,35 @@ func gatewayCurrentModel() string {
 		Data []struct {
 			ID     string `json:"id"`
 			Active bool   `json:"active"`
+			Kind   string `json:"kind"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return ""
 	}
+	// The small pool (bonsai4b) is auto-started and always resident, so if we
+	// took the first active entry we'd report bonsai even when a real chat
+	// (rapid-mlx/ds4) model is also running. Prefer an active chat-kind model
+	// (kind "" / "chat"); fall back to any active entry only if no chat model
+	// is running.
+	chatModel, anyModel := "", ""
 	for _, m := range parsed.Data {
-		if m.Active {
-			return m.ID
+		if !m.Active {
+			continue
+		}
+		if anyModel == "" {
+			anyModel = m.ID
+		}
+		if m.Kind == "" || m.Kind == "chat" {
+			if chatModel == "" {
+				chatModel = m.ID
+			}
 		}
 	}
-	return ""
+	if chatModel != "" {
+		return chatModel
+	}
+	return anyModel
 }
 
 // compressionState mirrors the gateway's GET /v1/compression response.
