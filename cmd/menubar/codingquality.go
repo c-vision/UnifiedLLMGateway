@@ -18,8 +18,12 @@ var codingQualityIcon = map[string]string{
 	// General-purpose, capable, can code competently but isn't
 	// coding-specialized -- reasonable but not the first choice for
 	// unusual/very recent language features.
-	"qw3627":   "🟡",
-	"qw3635":   "🟡",
+	"qw3627": "🟡",
+	// qw3635 (Qwen3.6-35B-A3B, 4-bit OptiQ, text-only) is the current
+	// workhorse chat model in this catalog's own agentic use — fast MoE and
+	// reliable tool calls — so it's held at the 🟢 tier rather than the
+	// general-purpose 🟡.
+	"qw3635":   "🟢",
 	"qw27opus": "🟡",
 	"qw122":    "🟡",
 
@@ -71,5 +75,6 @@ var codingQualityIcon = map[string]string{
 	"llama32":  "🔴", // 1B — title/warmup tier, not real coding
 
 	// Ollama-imported GGUF / Ollama-only models.
-	"paddleocr": "🔴",
+	"paddleocr":  "🔴",
+	"qwen2coder": "🔴", // Qwen2.5-Coder-32B via Ollama (Q4_K_M) — Ollama-only GGUF
 }

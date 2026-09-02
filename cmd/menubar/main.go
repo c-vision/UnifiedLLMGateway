@@ -244,7 +244,11 @@ func onReady() {
 		// is unambiguous. Disabled entries are greyed/non-clickable by
 		// addModelItems.
 		if len(omlxNames) > 0 {
-			mOmlx := systray.AddMenuItem("omlx", "Models served by the isolated oMLX server (backend \"omlx\")")
+			// Static red status dot: today oMLX is never running (its only entry,
+			// qw38flash, is disabled and unsupported by omlx 0.6.4). Keep it red
+			// so it reads like the other backend groups (🔴 = stopped). If a
+			// working omlx model is ever added, wire this into refreshLoop.
+			mOmlx := systray.AddMenuItem("🔴 omlx", "Models served by the isolated oMLX server (backend \"omlx\") — currently no loadable omlx model")
 			addModelItems(mOmlx, cfg, omlxNames, modelItems)
 		}
 
