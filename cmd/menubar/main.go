@@ -174,7 +174,7 @@ func onReady() {
 		// within the pool (loading flux2-klein-4b kills flux1-dev if it
 		// was running, same as loading a different chat model kills the
 		// previous one) -- but the pools never touch each other.
-		var mlxNames, ds4Names, ocrNames, fluxNames, smallNames []string
+		var mlxNames, ds4Names, ocrNames, fluxNames, smallNames, omlxNames []string
 		for n, m := range cfg.Models {
 			if m.Kind == "media" {
 				if m.Backend == "mflux" {
@@ -189,13 +189,16 @@ func onReady() {
 				continue
 			}
 			switch m.Backend {
-			case "mlx", "omlx":
+			case "mlx":
 				mlxNames = append(mlxNames, n)
+			case "omlx":
+				omlxNames = append(omlxNames, n)
 			case "ds4":
 				ds4Names = append(ds4Names, n)
 			}
 		}
 		sort.Strings(mlxNames)
+		sort.Strings(omlxNames)
 		sort.Strings(ds4Names)
 		sort.Strings(ocrNames)
 		sort.Strings(fluxNames)
@@ -233,6 +236,17 @@ func onReady() {
 		mStartDS4 = addStartItem(mDS4, "Start ds4", ds4Default, cfg.BackendPort)
 		mStopDS4 = mDS4.AddSubMenuItem("Stop ds4", fmt.Sprintf("Stop the backend on port %d", cfg.BackendPort))
 		addModelItems(mDS4, cfg, ds4Names, modelItems)
+
+		// oMLX-backend models get their own section (they're served by the
+		// isolated oMLX server, not rapid-mlx). No Start/Stop here: oMLX shares
+		// the gateway backend port handling, and today its only entry is a
+		// disabled/unusable model — so this is purely a category so the engine
+		// is unambiguous. Disabled entries are greyed/non-clickable by
+		// addModelItems.
+		if len(omlxNames) > 0 {
+			mOmlx := systray.AddMenuItem("omlx", "Models served by the isolated oMLX server (backend \"omlx\")")
+			addModelItems(mOmlx, cfg, omlxNames, modelItems)
+		}
 
 		if len(ocrNames) > 0 || len(fluxNames) > 0 {
 			systray.AddSeparator()

@@ -55,6 +55,7 @@
       "has_vision": false,
       "ctx": 32768,
       "quant_bits": 4,
+      "disabled": true,
       "mtp_enabled": true,
       "working_set_multiplier": 1.5
     },
