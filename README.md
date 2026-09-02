@@ -24,7 +24,9 @@ Unified Gateway does that translation, and adds model lifecycle management on to
 - **No port collisions, by design** — the gateway's own adapters, the model backend, and third-party tools (e.g. `ollama`) are always kept on distinct, non-overlapping ports
 - **Optional background service** — install as a macOS `launchd` agent that starts at login and restarts on crash
 - **Optional menu bar controller** — a small native tray app to start/stop the gateway, the model backend, and Ollama, and switch models, without a terminal
-- **Live-toggleable prompt compression** — shrinks stale, duplicated, or oversized content in older messages before it ever reaches the backend, cutting both prefill time and KV-cache pressure on long-running sessions; on by default, no restart needed to flip it. Every per-message compression decision is frozen, so the bytes sent to the backend stay stable turn after turn and its content-addressed prefix cache keeps working (see [Prompt compression](#prompt-compression))
+- **Direct passthrough to the backend (default)** — the OpenAI adapter forwards chat requests **byte-identical** to rapid-mlx (no message rewriting), so the backend's content-addressed prefix cache reuses the stable prefix and only the new tail is prefilled. Opt out with `UG_DIRECT_RAPIDMLX=0` (see [Direct passthrough](#direct-passthrough-to-the-backend-default))
+- **Live-toggleable prompt compression** — shrinks stale, duplicated, or oversized content in older messages before it ever reaches the backend, cutting prefill time and KV-cache pressure on long-running sessions. Runs on the **non-direct** path (i.e. when `UG_DIRECT_RAPIDMLX=0`); on by default there, no restart needed to flip it. Every per-message decision is frozen, so the bytes stay stable turn after turn (see [Prompt compression](#prompt-compression))
+- **Disabled & hybrid-aware models** — a `"disabled": true` entry is shown greyed/non-selectable and refused on load; hybrid (Mamba/GatedDeltaNet) models get bounded `--hybrid-cache-entries` prefix reuse so they don't re-prefill every turn
 - **Session tracking** — per-conversation continuity detection exposed at `GET /v1/sessions`, so a history edit or compaction is visible as a session break that predicts a backend prefix-cache miss (see [Session tracking](#session-tracking))
 - **KV checkpoint lifecycle management** — rapid-mlx's disk-backed KV checkpoints are disabled (pure I/O churn on the generation path) and any stale snapshots are cleared automatically on model switch and manually via the menu bar's **Clear Disk Caches** item (see [KV checkpoint lifecycle](#kv-checkpoint-lifecycle))
 
@@ -255,6 +257,30 @@ curl -X POST http://localhost:8082/v1/compression -d '{"enabled":false}'    # fl
 ```
 
 The menu bar app (below) exposes the same toggle as a checkbox, with cumulative savings in its tooltip.
+
+> ⚠️ Prompt compression runs on the **non-direct** request path. With the default direct passthrough enabled (below) message rewriting is skipped entirely, so compression is effectively off — the backend prefix cache is what keeps long sessions fast there.
+
+## Direct passthrough to the backend (default)
+
+`compress.go`'s message rewriting is deliberately **not** applied by default anymore. A large agentic conversation showed the real bottleneck: even frozen, per-message compression rewrites older messages as they leave the protected window, and any byte change to an old message forces rapid-mlx's content-addressed prefix cache to miss → a near-full re-prefill of the whole context on every turn (measured at ~21–49k tokens per turn in real OpenCode/pi sessions), which is slower than leaving those bytes untouched and letting the cache reuse the stable prefix.
+
+So `handleOpenAIProxy` now has a **direct passthrough** path (`direct.go`) that forwards the chat body to the active backend **byte-identical** — no `compressMessages`, no injected fields, no global request serialization. With the messages byte-stable turn after turn, rapid-mlx's radix/prefix cache reuses the already-seen prefix and only the genuinely new tail is prefilled. Model resolution (which pool: chat / small / media), load-on-demand, and the mismatch self-heal still run — the gateway is not skipped, only the *content rewriting* is.
+
+It is controlled by one flag and **on by default**:
+
+```bash
+UG_DIRECT_RAPIDMLX=0 unified-gateway   # run the historical transformed path instead
+```
+
+Anything the transformed path did is not deleted — set the flag to `0` (or `false`/`off`/`no`) to get compression + session gating back. The Anthropic adapter already forwarded uncompressed, so it is unaffected.
+
+### Disabled models
+
+A model that is unstable or unsupported on its backend (e.g. a DFlash2/Metal-OOM path, or a GLM checkpoint rapid-mlx can't serve reliably) can be flagged `"disabled": true` in `models.json`. Disabled models stay visible in `GET /v1/models` with `active: false` and `disabled: true` (so clients can grey them out and the menu bar shows them non-clickable), but every load/request path refuses them with a clear error instead of attempting a crashing load. Disabled models are skipped when the config is applied, never auto-started, and never a default.
+
+### Hybrid (Mamba/GatedDeltaNet) prefix reuse
+
+Models like Qwen3-Coder-Next are hybrid Mamba+Transformer; rapid-mlx drops their prefix-cache entries by default (`hybrid_reuse_max_entries=0`). `launchMLX` now passes `--hybrid-cache-entries 8` so hybrid models get a safe, LRU-bounded within-conversation prefix reuse too — without it they re-prefill the whole context every turn.
 
 ## Session tracking
 
