@@ -62,6 +62,13 @@ type ModelConfig struct {
 	QuantBits   int    `json:"quant_bits,omitempty"`
 	OllamaModel string `json:"ollama_model,omitempty"`
 	Kind        string `json:"kind,omitempty"`
+	// Disabled marks a model that must not be loaded or served (e.g. one that
+	// is unstable/unsupported on the available backend). Disabled models stay
+	// visible in GET /v1/models with active=false + disabled=true (so a client
+	// like unicorn or the menu bar can render them greyed/non-selectable), but
+	// every load/request path refuses them with a clear error instead of
+	// attempting a (crashing) load.
+	Disabled bool `json:"disabled,omitempty"`
 	// ToolCallParser overrides rapid-mlx's own tool-call-format
 	// auto-detection (vllm_mlx/model_auto_config.py), which matches
 	// regexes against the model PATH STRING, not model_type -- e.g.
@@ -362,7 +369,6 @@ func runningOmlxModel(cfg *Config, port int) string {
 	return ""
 }
 
-
 // has loaded in memory (its own tag, e.g. "gemma4:31b-mlx"), "" if none.
 func queryOllamaLoadedModel(port int) string {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/ps", port))
@@ -652,6 +658,13 @@ func launchMLX(cfg *Config, shortName string, m ModelConfig, port int) (*exec.Cm
 	// cost entirely; if disk persistence across restarts is ever needed it
 	// can be re-enabled for the specific workload that needs it.
 	args = append(args, "--kv-disk-checkpoint-interval", "0")
+	// Hybrid (Mamba/GatedDeltaNet) models: rapid-mlx drops prefix-cache
+	// entries by default (hybrid_reuse_max_entries=0, #1025/#1058), so every
+	// turn of a hybrid model like Qwen3-Coder-Next re-prefills the whole
+	// context. #1103 added a safe, bounded within-conversation reuse (exact /
+	// prefix-extension fetch, LRU-evicted). Opt in here so hybrid models reuse
+	// their prefix too; non-hybrid models are unaffected by the gate.
+	args = append(args, "--hybrid-cache-entries", "8")
 	// PFlash OFF by default: rapid-mlx's own metrics.py documents that
 	// "when PFlash compression engages, the prompt skips the prefix-cache
 	// fetch + store paths entirely" -- and qw3627/qw27/etc are
@@ -1036,6 +1049,17 @@ func loadModel(shortName string) error {
 	return err
 }
 
+// modelDisabled reports whether a configured model is marked disabled
+// (must not be loaded/served). Reads config fresh, like every other handler.
+func modelDisabled(shortName string) bool {
+	cfg, err := loadConfig()
+	if err != nil {
+		return false
+	}
+	m, ok := cfg.Models[shortName]
+	return ok && m.Disabled
+}
+
 func loadModelLocked(shortName string) error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -1048,6 +1072,9 @@ func loadModelLocked(shortName string) error {
 			names = append(names, n)
 		}
 		return fmt.Errorf("unknown model %q — available: %s", shortName, strings.Join(names, ", "))
+	}
+	if m.Disabled {
+		return fmt.Errorf("model %q is disabled (unstable/unsupported on this backend) and cannot be loaded", shortName)
 	}
 	if m.Backend != "mlx" && m.Backend != "ds4" && m.Backend != "ollama" && m.Backend != "mflux" && m.Backend != "omlx" {
 		return fmt.Errorf("model %q has unsupported backend %q", shortName, m.Backend)

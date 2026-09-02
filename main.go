@@ -130,6 +130,10 @@ func (g *Gateway) handleAnthropicMessages(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "Invalid request format"})
 		return
 	}
+	if modelDisabled(req.Model) {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("model %q is disabled and cannot be served", req.Model)})
+		return
+	}
 
 	if compactType := detectCompactType(req.System, req.Messages); compactType != compactNone {
 		log.Printf("🗜️  %s", compactTypeLabel(compactType))
@@ -621,6 +625,11 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 		if m.Kind == "small" {
 			isActive = isSmallModelActive(cfg, name)
 		}
+		// Disabled models stay listed (so a client can render them greyed /
+		// non-selectable) but are never reported active and can't be loaded.
+		if m.Disabled {
+			isActive = false
+		}
 		data = append(data, gin.H{
 			"id":         name,
 			"object":     "model",
@@ -630,6 +639,7 @@ func (g *Gateway) handleListModels(c *gin.Context) {
 			"backend":    m.Backend,
 			"has_vision": m.HasVision,
 			"active":     isActive,
+			"disabled":   m.Disabled,
 		})
 	}
 	c.JSON(200, gin.H{"object": "list", "data": data})
@@ -694,6 +704,10 @@ func (g *Gateway) handleLoadModel(c *gin.Context, shortName string) {
 		c.JSON(404, gin.H{"error": fmt.Sprintf("unknown model %q", shortName)})
 		return
 	}
+	if cfg.Models[shortName].Disabled {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("model %q is disabled and cannot be loaded", shortName)})
+		return
+	}
 	ensureBackendLoading(shortName)
 	c.JSON(202, gin.H{"status": "loading", "model": shortName})
 }
@@ -751,6 +765,17 @@ func (g *Gateway) handleOpenAIProxy(c *gin.Context) {
 	var bodyBytes []byte
 	if c.Request.Body != nil {
 		bodyBytes, _ = io.ReadAll(c.Request.Body)
+	}
+
+	// Path AGGIUNTIVO "direttamente a rapid-mlx" (default): inoltra il body
+	// del client pressoché intatto al backend, senza compressione/session/
+	// iniezioni sul contenuto — così la prefix-cache di rapid-mlx riusa davvero
+	// (LCP stabile). Disattivabile con UG_DIRECT_RAPIDMLX=0 per tornare al path
+	// storico sottostante (vedi direct.go). Il path storico NON è modificato né
+	// cancellato: con il flag off si esegue esattamente come prima.
+	if directMode() && c.Request.Method == http.MethodPost && len(bodyBytes) > 0 {
+		g.handleDirectOpenAI(c, bodyBytes)
+		return
 	}
 
 	backend := g.resolveBackend()

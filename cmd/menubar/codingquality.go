@@ -27,7 +27,7 @@ var codingQualityIcon = map[string]string{
 	// same "qwen3_5" lineage as qw27/qw3627/qw27opus above -- replaces
 	// qw27 (removed) as the vision-capable general model in this tier.
 	// Untested in this catalog's own real agentic use yet.
-	"qw38":         "🟡",
+	"qw38":        "🟡",
 	"qw38dflash2": "🟡", // same base as qw38, DFlash2 draft 975M mxfp4, block 5
 	"qw38flash":   "🟡", // labhraighlep Qwen3.8-Flash-Next 4-bit, coding-tuned small
 
@@ -65,4 +65,11 @@ var codingQualityIcon = map[string]string{
 	"mixtral":   "🔴",
 	"gptoss120": "🔴",
 	"antirez":   "🔴",
+
+	// Tiny models (<=4B): fast but limited on real coding tasks.
+	"qw27omni": "🔴",
+	"llama32":  "🔴", // 1B — title/warmup tier, not real coding
+
+	// Ollama-imported GGUF / Ollama-only models.
+	"paddleocr": "🔴",
 }

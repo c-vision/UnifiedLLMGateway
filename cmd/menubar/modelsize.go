@@ -37,11 +37,14 @@ func estimateDiskGB(path string) float64 {
 	}
 	var total int64
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".safetensors") {
+		if e.IsDir() {
 			continue
 		}
-		if fi, err := e.Info(); err == nil {
-			total += fi.Size()
+		name := e.Name()
+		if strings.HasSuffix(name, ".safetensors") || strings.HasSuffix(name, ".gguf") {
+			if fi, err := e.Info(); err == nil {
+				total += fi.Size()
+			}
 		}
 	}
 	return float64(total) / (1024 * 1024 * 1024)

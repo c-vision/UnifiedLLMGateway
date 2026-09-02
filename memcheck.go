@@ -49,7 +49,7 @@ func mlxCacheReserveMBFor(modelSizeGB float64) int {
 	case modelSizeGB < 20:
 		return 28672
 	case modelSizeGB < 45:
-		return 16384
+		return 8192
 	default:
 		return 8192
 	}

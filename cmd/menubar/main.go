@@ -85,6 +85,11 @@ func addModelItems(parent *systray.MenuItem, cfg *gwConfig, names []string, mode
 		}
 		item := parent.AddSubMenuItem(label, "Load "+n)
 		modelItems[n] = item
+		// Disabled models are shown greyed out and not clickable (their load
+		// would fail anyway — the gateway refuses them).
+		if m.Disabled {
+			item.Disable()
+		}
 		go func(shortName string, item *systray.MenuItem) {
 			for range item.ClickedCh {
 				loadModelAsync(shortName)
@@ -153,7 +158,8 @@ func onReady() {
 	var mMLX, mDS4, mStartMLX, mStartDS4, mStopMLX, mStopDS4 *systray.MenuItem
 	var mOCR, mStartOCR, mStopOCR *systray.MenuItem
 	var mFlux, mStartFlux, mStopFlux *systray.MenuItem
-	var mlxDefault, ds4Default, ocrDefault, fluxDefault, omlxDefault string
+	var mSmall, mStartSmall, mStopSmall *systray.MenuItem
+	var mlxDefault, ds4Default, ocrDefault, fluxDefault, smallDefault string
 
 	if cfgErr != nil {
 		mMissing := systray.AddMenuItem("Backends unavailable (models.json not found)", "")
@@ -168,7 +174,7 @@ func onReady() {
 		// within the pool (loading flux2-klein-4b kills flux1-dev if it
 		// was running, same as loading a different chat model kills the
 		// previous one) -- but the pools never touch each other.
-		var mlxNames, ds4Names, ocrNames, fluxNames, smallNames, omlxNames []string
+		var mlxNames, ds4Names, ocrNames, fluxNames, smallNames []string
 		for n, m := range cfg.Models {
 			if m.Kind == "media" {
 				if m.Backend == "mflux" {
@@ -183,11 +189,8 @@ func onReady() {
 				continue
 			}
 			switch m.Backend {
-			case "mlx":
+			case "mlx", "omlx":
 				mlxNames = append(mlxNames, n)
-			case "omlx":
-				mlxNames = append(mlxNames, n)
-				omlxNames = append(omlxNames, n)
 			case "ds4":
 				ds4Names = append(ds4Names, n)
 			}
@@ -197,13 +200,9 @@ func onReady() {
 		sort.Strings(ocrNames)
 		sort.Strings(fluxNames)
 		sort.Strings(smallNames)
-		sort.Strings(omlxNames)
 
 		if len(mlxNames) > 0 {
 			mlxDefault = mlxNames[0]
-		}
-		if len(omlxNames) > 0 {
-			omlxDefault = omlxNames[0]
 		}
 		if len(ds4Names) > 0 {
 			ds4Default = ds4Names[0]
@@ -214,13 +213,21 @@ func onReady() {
 		if len(fluxNames) > 0 {
 			fluxDefault = fluxNames[0]
 		}
+		if len(smallNames) > 0 {
+			smallDefault = smallNames[0]
+		}
 
 		mMLX = systray.AddMenuItem("rapid-mlx", "")
 		mStartMLX = addStartItem(mMLX, "Start rapid-mlx", mlxDefault, cfg.BackendPort)
 		mStopMLX = mMLX.AddSubMenuItem("Stop rapid-mlx", fmt.Sprintf("Stop the backend on port %d", cfg.BackendPort))
-		// Mostra i modelli small (bonsai) INSIEME ai normali nel menù rapid-mlx
-		// (esecuzione su porta small separata -> concorrente, routing via m.Kind).
-		addModelItems(mMLX, cfg, append(append([]string{}, mlxNames...), smallNames...), modelItems)
+		addModelItems(mMLX, cfg, mlxNames, modelItems)
+
+		if len(smallNames) > 0 {
+			mSmall = systray.AddMenuItem("small models", "Cheap secondary models (bonsai4b, llama3.2-1B; e.g. opencode's small_model for conversation titles) -- own pool, own port, never kills the main chat model")
+			mStartSmall = addStartItem(mSmall, "Start small", smallDefault, cfg.SmallBackendPort)
+			mStopSmall = mSmall.AddSubMenuItem("Stop small", fmt.Sprintf("Stop the backend on port %d", cfg.SmallBackendPort))
+			addModelItems(mSmall, cfg, smallNames, modelItems)
+		}
 
 		mDS4 = systray.AddMenuItem("ds4", "")
 		mStartDS4 = addStartItem(mDS4, "Start ds4", ds4Default, cfg.BackendPort)
@@ -299,22 +306,25 @@ func onReady() {
 		mStartFlux:    mStartFlux,
 		mStopFlux:     mStopFlux,
 		fluxDefault:   fluxDefault,
+		mSmall:        mSmall,
+		mStartSmall:   mStartSmall,
+		mStopSmall:    mStopSmall,
+		smallDefault:  smallDefault,
 	})
 
-	// Avvia rapid-mlx di default al lancio (dopo che la GUI si è inizializzata):
-	// il modello small (bonsai) resta su porta separata e concorrente. Se sono
-	// configurati modelli oMLX (es. qw38dflash2) si avvia quello per default,
-	// altrimenti il primo modello rapid-mlx — come richiesto, il server oMLX
-	// parte di default allo stesso modo di rapid-mlx.
-	if omlxDefault != "" || mlxDefault != "" {
+	// Avvia SEMPRE il pool "small models" (bonsai) al lancio: è il modello
+	// leggero che gateway/opencode usano per titoli/warmup e deve restare
+	// sempre attivo. Gira sul pool dedicato SmallBackendPort (porta separata,
+	// concorrente e indipendente dal backend chat). NON avvia automaticamente
+	// né il backend chat rapid-mlx né ds4 né IMAGES (FLUX) né Ollama: questi
+	// restano spenti finché non vengono avviati esplicitamente dal menu.
+	// Ollama, se è già in esecuzione a livello di sistema, NON viene toccato
+	// (resta attivo): qui non lo si avvia e non lo si ferma mai.
+	if cfg != nil && smallDefault != "" {
 		go func() {
 			time.Sleep(3 * time.Second)
-			target := omlxDefault
-			if target == "" {
-				target = mlxDefault
-			}
-			if _, active := runningMLXModel(cfg.BackendPort); !active {
-				loadModelAsync(target)
+			if _, active := runningMLXModel(cfg.SmallBackendPort); !active {
+				loadModelAsync(smallDefault)
 			}
 		}()
 	}
@@ -339,6 +349,8 @@ func onReady() {
 				killPort(cfg.MediaBackendPort)
 			case <-clickedOrNil(mStopFlux):
 				killPort(cfg.FluxBackendPort)
+			case <-clickedOrNil(mStopSmall):
+				killPort(cfg.SmallBackendPort)
 			case <-mOllamaStart.ClickedCh:
 				go func() {
 					if confirmPortFree(ollamaPort, "Ollama") {

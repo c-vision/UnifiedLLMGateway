@@ -24,6 +24,7 @@ type modelConfig struct {
 	Backend          string `json:"backend"`
 	OllamaModel      string `json:"ollama_model,omitempty"`
 	Kind             string `json:"kind,omitempty"`
+	Disabled         bool   `json:"disabled,omitempty"`
 	Ctx              int    `json:"ctx,omitempty"`
 	DflashDraftModel string `json:"dflash_draft_model,omitempty"`
 	DflashBlockSize  int    `json:"dflash_block_size,omitempty"`
