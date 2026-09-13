@@ -80,9 +80,15 @@ func addModelItems(parent *systray.MenuItem, cfg *gwConfig, names []string, mode
 			displayLabel = strings.TrimSuffix(displayLabel, ")") + ", " + strings.Join(extra, ", ") + ")"
 		}
 		label := fmt.Sprintf("%s (%s)", displayLabel, n)
-		if icon, ok := codingQualityIcon[n]; ok {
-			label = icon + " " + label
+		// Every model gets a traffic-light dot. Models hand-assigned in
+		// codingQualityIcon use that tier; anything newly added to
+		// models.json without an entry falls back to a conservative 🔴
+		// instead of rendering with no indicator at all.
+		icon, ok := codingQualityIcon[n]
+		if !ok {
+			icon = "🔴"
 		}
+		label = icon + " " + label
 		item := parent.AddSubMenuItem(label, "Load "+n)
 		modelItems[n] = item
 		// Disabled models are shown greyed out and not clickable (their load

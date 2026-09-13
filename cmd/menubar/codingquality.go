@@ -70,6 +70,17 @@ var codingQualityIcon = map[string]string{
 	"gptoss120": "🔴",
 	"antirez":   "🔴",
 
+	// DeepSeek-V2-Lite (MoE+MLA, 8.2G, 4-bit) — general-purpose chat, not
+	// coding-specialized (same caveat as ds32, minus the reasoning tune).
+	// Capable enough to code, but unverified in this catalog's own agentic
+	// use -> general-purpose tier.
+	"dsv2lite": "🟡",
+
+	// Kimi-Linear-48B-A3B (hybrid linear attention + MoE, 48B/3B active,
+	// 4-bit) — capable modern MoE from a coding-capable lineage, but the
+	// linear-attention variant is unverified here -> general-purpose tier.
+	"kimilinear": "🟡",
+
 	// Tiny models (<=4B): fast but limited on real coding tasks.
 	"qw27omni": "🔴",
 	"llama32":  "🔴", // 1B — title/warmup tier, not real coding

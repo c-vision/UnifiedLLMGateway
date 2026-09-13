@@ -112,6 +112,24 @@
       "ctx": 32768,
       "quant_bits": 8
     },
+    "dsv2lite": {
+      "path": "~/ai/Models/DeepSeek-V2-Lite-Chat-4bit-mlx",
+      "label": "DeepSeek-V2-Lite (MoE+MLA, 4-bit)",
+      "backend": "mlx",
+      "model_type": "deepseek_v2",
+      "has_vision": false,
+      "ctx": 163840,
+      "quant_bits": 4
+    },
+    "kimilinear": {
+      "path": "~/ai/Models/Kimi-Linear-48B-A3B-Instruct-4bit",
+      "label": "Kimi-Linear-48B-A3B (hybrid linear attn, 4-bit)",
+      "backend": "mlx",
+      "model_type": "kimi_linear",
+      "has_vision": false,
+      "ctx": 1048576,
+      "quant_bits": 4
+    },
     "gemma4": {
       "path": "~/ai/Models/gemma-4-31b-it-4bit",
       "label": "Gemma 4 31B (4-bit)",
@@ -187,6 +205,15 @@
       "has_vision": true,
       "kind": "media",
       "quant_bits": 8
+    },
+    "dotsocr": {
+      "path": "~/ai/Models/media/ocr/dots.ocr-4bit",
+      "label": "dots.ocr (4-bit, document OCR)",
+      "backend": "mlx",
+      "model_type": "dots_ocr",
+      "has_vision": true,
+      "kind": "media",
+      "quant_bits": 4
     },
     "flux1-dev": {
       "path": "~/ai/Models/media/image-gen/FLUX.1-dev-mflux-4bit",
